@@ -31,6 +31,29 @@ class CurlSolverTest {
     }
 
     @Test
+    fun `canonical mapping sanitizes nonfinite coordinates`() {
+        val nanX = CurlSolver.toCanonical(Vec2(Double.NaN, 5.0), PageSide.RIGHT)
+        assertEquals(0.0, nanX.x, 0.0)
+        assertEquals(5.0, nanX.y, 0.0)
+
+        val nanMirrored = CurlSolver.toCanonical(Vec2(Double.NaN, 5.0), PageSide.LEFT)
+        assertEquals(0.0, nanMirrored.x, 0.0)
+        assertEquals(5.0, nanMirrored.y, 0.0)
+
+        val inf = CurlSolver.toCanonical(Vec2(Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY), PageSide.RIGHT)
+        assertEquals(0.0, inf.x, 0.0)
+        assertEquals(0.0, inf.y, 0.0)
+
+        val fromNan = CurlSolver.fromCanonical(Vec2(Double.NaN, 5.0), PageSide.LEFT)
+        assertEquals(0.0, fromNan.x, 0.0)
+        assertEquals(5.0, fromNan.y, 0.0)
+
+        val fromInf = CurlSolver.fromCanonical(Vec2(Double.POSITIVE_INFINITY, -7.0), PageSide.LEFT)
+        assertEquals(0.0, fromInf.x, 0.0)
+        assertEquals(-7.0, fromInf.y, 0.0)
+    }
+
+    @Test
     fun `constrained target keeps a corner within both hinge reach disks`() {
         val grab = Vec2(420.0, -280.0)
         val constrained = CurlSolver.constrainTarget(grab, Vec2(-600.0, 500.0), 420.0, 560.0)
@@ -71,6 +94,38 @@ class CurlSolverTest {
     }
 
     @Test
+    fun `huge drag with tiny width clamps progress instead of flat fallback`() {
+        // Reference (node curl-math.js): progress=1, phase=fold — the L/W overflow
+        // is clamped in place before the finiteness check, never discarded.
+        val state = CurlSolver.solve(
+            grab = Vec2(1e307, 0.0),
+            target = Vec2(-1e307, 0.0),
+            pageWidth = 5e-8,
+            pageHeight = 560.0,
+            requestedRadius = 20.0,
+        )
+        assertTrue(state.finite)
+        assertEquals(1.0, state.progress, 1e-9)
+        assertEquals(CurlState.Phase.FOLD, state.phase)
+        assertTrue(state.grabDistance > 0.0)
+    }
+
+    @Test
+    fun `huge finite drag keeps unclamped-overflow-free progress`() {
+        // L/W = 4e307 is finite, so both reference and port agree: progress clamps to 1.
+        val state = CurlSolver.solve(
+            grab = Vec2(1e300, 0.0),
+            target = Vec2(-1e300, 0.0),
+            pageWidth = 5e-8,
+            pageHeight = 560.0,
+            requestedRadius = 20.0,
+        )
+        assertTrue(state.finite)
+        assertEquals(1.0, state.progress, 1e-9)
+        assertEquals(CurlState.Phase.FOLD, state.phase)
+    }
+
+    @Test
     fun `zero drag is finite and leaves the page flat`() {
         val state = CurlSolver.solve(
             grab = Vec2(420.0, 0.0),
@@ -101,6 +156,82 @@ class CurlSolverTest {
             val b = CurlSolver.deformPoint(Vec2(p.x + 1.0, p.y), state)
             val separation = distance3(a, b)
             assertTrue(abs(separation - 1.0) < 1e-4, "point $p edge length $separation")
+        }
+    }
+
+    @Test
+    fun `deform point uses the state tangent not a recomputed perpendicular`() {
+        // Reference behavior: t = normalize(state.axisTangent, fallback (-n.y, n.x)).
+        // Build a state whose stored tangent is deliberately NOT perpendicular to
+        // the normal; deformPoint must follow the stored tangent.
+        val axisPoint = Vec2(100.0, 50.0)
+        val n = Vec2(1.0, 0.0)
+        val oblique = CurlState(
+            grab = Vec2(420.0, 50.0),
+            target = axisPoint,
+            pageWidth = width,
+            pageHeight = height,
+            radius = 20.0,
+            axisPoint = axisPoint,
+            axisNormal = n,
+            axisTangent = Vec2(1.0, 1.0),
+            grabDistance = 100.0,
+            progress = 0.5,
+            phase = CurlState.Phase.CURL,
+            finite = true,
+        )
+        val probe = axisPoint + n * 10.0
+        val deformed = CurlSolver.deformPoint(probe, oblique)
+
+        // d = 10, angle = 0.5, lat = 20*sin(0.5); s = probe . t (stored, oblique).
+        val lat = 20.0 * kotlin.math.sin(10.0 / 20.0)
+        val invSqrt2 = 1.0 / kotlin.math.sqrt(2.0)
+        val tNorm = Vec2(invSqrt2, invSqrt2)
+        val s = (probe - axisPoint).let { it.x * tNorm.x + it.y * tNorm.y }
+        // With the stored tangent: out = axis + t*s + n*lat.
+        assertEquals(axisPoint.x + tNorm.x * s + lat, deformed.x, 1e-9)
+        assertEquals(axisPoint.y + tNorm.y * s, deformed.y, 1e-9)
+
+        // If deformPoint had recomputed the perpendicular of n=(1,0), t would be
+        // (0,1): x would lose the t.x*s term and y would gain it. Assert the
+        // perpendicular-recompute result is clearly different.
+        val sPerp = (probe - axisPoint).let { it.x * 0.0 + it.y * 1.0 }
+        val perpX = axisPoint.x + lat
+        val perpY = axisPoint.y + sPerp
+        assertTrue(
+            abs(perpX - deformed.x) > 1.0 || abs(perpY - deformed.y) > 1.0,
+            "deformPoint must not recompute the perpendicular tangent",
+        )
+    }
+
+    @Test
+    fun `deform point falls back to perpendicular when state tangent is degenerate`() {
+        val axisPoint = Vec2(100.0, 50.0)
+        val n = Vec2(1.0, 0.0)
+        val lat = 20.0 * kotlin.math.sin(10.0 / 20.0)
+        val probe = axisPoint + n * 10.0
+
+        val degenerateTangents = listOf(Vec2(Double.NaN, Double.NaN), Vec2(0.0, 0.0))
+        for (tangent in degenerateTangents) {
+            val state = CurlState(
+                grab = Vec2(420.0, 50.0),
+                target = axisPoint,
+                pageWidth = width,
+                pageHeight = height,
+                radius = 20.0,
+                axisPoint = axisPoint,
+                axisNormal = n,
+                axisTangent = tangent,
+                grabDistance = 100.0,
+                progress = 0.5,
+                phase = CurlState.Phase.CURL,
+                finite = true,
+            )
+            val deformed = CurlSolver.deformPoint(probe, state)
+            // Fallback t = (-n.y, n.x) = (0,1); s = rel . t = 0; out = axis + n*lat.
+            assertEquals(axisPoint.x + lat, deformed.x, 1e-9, "tangent $tangent x")
+            assertEquals(axisPoint.y, deformed.y, 1e-9, "tangent $tangent y")
+            assertTrue(deformed.isFinite())
         }
     }
 
@@ -197,6 +328,33 @@ class CurlSolverTest {
             CurlSolver.decideRelease(
                 progress = 0.2,
                 velocity = VelocitySample(value = 0.8, ageMs = 121.0),
+                cancelled = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `release decisions treat NaN progress and NaN velocity as neutral`() {
+        // NaN progress falls back to 0 -> below commit threshold.
+        assertEquals(
+            CurlSolver.ReleaseDecision.Cancel,
+            CurlSolver.decideRelease(progress = Double.NaN, velocity = 0.0, cancelled = false),
+        )
+        // NaN velocity falls back to 0 -> no velocity boost, progress decides.
+        assertEquals(
+            CurlSolver.ReleaseDecision.Cancel,
+            CurlSolver.decideRelease(progress = 0.2, velocity = Double.NaN, cancelled = false),
+        )
+        assertEquals(
+            CurlSolver.ReleaseDecision.Commit,
+            CurlSolver.decideRelease(progress = 0.6, velocity = Double.NaN, cancelled = false),
+        )
+        // VelocitySample with NaN ageMs is not provably stale -> value counts as fresh.
+        assertEquals(
+            CurlSolver.ReleaseDecision.Commit,
+            CurlSolver.decideRelease(
+                progress = 0.2,
+                velocity = VelocitySample(value = 0.8, ageMs = Double.NaN),
                 cancelled = false,
             ),
         )

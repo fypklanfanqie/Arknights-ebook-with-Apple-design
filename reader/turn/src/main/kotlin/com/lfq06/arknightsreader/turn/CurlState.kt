@@ -14,11 +14,17 @@ data class CurlState(
     val axisPoint: Vec2,
     /** Drag direction (from target toward grab), unit length or (1, 0) fallback. */
     val axisNormal: Vec2,
-    /** Perpendicular of axisNormal: (-n.y, n.x). */
+    /** Perpendicular of axisNormal: (-n.y, n.x). Deformations use this stored tangent. */
     val axisTangent: Vec2,
     val grabDistance: Double,
     val progress: Double,
     val phase: Phase,
+    /**
+     * Snapshot of the finiteness validation performed by [CurlSolver.solve]
+     * when this state was built: true means every numeric field was verified
+     * finite at solve time. For a live re-check of the current values use
+     * [isFinite].
+     */
     val finite: Boolean,
 ) {
     enum class Phase { FLAT, FOLD, CURL }
@@ -26,6 +32,10 @@ data class CurlState(
     val hingeTop: Vec2 get() = Vec2(0.0, -pageHeight / 2.0)
     val hingeBottom: Vec2 get() = Vec2(0.0, pageHeight / 2.0)
 
+    /**
+     * Live finiteness re-check: recomputes finiteness from the current field
+     * values (unlike [finite], which is the snapshot recorded by the solver).
+     */
     fun isFinite(): Boolean = finite &&
         grab.isFinite() && target.isFinite() &&
         pageWidth.isFinite() && pageHeight.isFinite() && radius.isFinite() &&
