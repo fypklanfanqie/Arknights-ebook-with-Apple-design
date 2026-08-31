@@ -206,13 +206,31 @@ class TurnGestureReducerTest {
     // ---- release decisions ----
 
     @Test
-    fun `release past half progress commits`() {
+    fun `fresh velocity commits a release below half progress`() {
+        // progress stays below COMMIT_PROGRESS (0.3 < 0.5); the commit comes from
+        // the velocity branch: the last drag moved 140 canonical px commitward in
+        // 30ms (velocity ~4.67 > VELOCITY_THRESHOLD) and is fresh at release
+        // (age 5ms < VELOCITY_FRESH_MS).
         var state = press()
         state = move(state, Vec2(360.0, -180.0), 10.0)
         state = armed(state)
         state = move(state, Vec2(220.0, -180.0), 40.0)
         state = TurnGesture.reduce(state, TurnGestureAction.Progress(0.3, 40.0), env)
         state = TurnGesture.reduce(state, TurnGestureAction.Release(1L, Vec2(220.0, -180.0), 45.0), env)
+        assertEquals(TurnPhase.SETTLING, state.phase)
+        assertEquals(TurnOutcome.Commit, state.outcome)
+    }
+
+    @Test
+    fun `progress at or past half commits even with stale velocity`() {
+        // Pure progress path: progress >= COMMIT_PROGRESS commits regardless of
+        // velocity. The only velocity sample is stale by release time (age =
+        // 390ms > VELOCITY_FRESH_MS), so the velocity branch alone yields 0.
+        var state = press()
+        state = move(state, Vec2(300.0, -180.0), 10.0)
+        state = armed(state)
+        state = TurnGesture.reduce(state, TurnGestureAction.Progress(0.5, 40.0), env)
+        state = TurnGesture.reduce(state, TurnGestureAction.Release(1L, Vec2(300.0, -180.0), 400.0), env)
         assertEquals(TurnPhase.SETTLING, state.phase)
         assertEquals(TurnOutcome.Commit, state.outcome)
     }
