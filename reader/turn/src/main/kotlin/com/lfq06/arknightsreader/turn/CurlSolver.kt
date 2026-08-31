@@ -1,32 +1,53 @@
 package com.lfq06.arknightsreader.turn
 
-import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.min
 import kotlin.math.sin
 
-/** Pure, finite-safe geometry for a page hinged on the x = 0 edge. */
+/** Direction of a swipe gesture on the page. */
+enum class PageSide { RIGHT, LEFT }
+
+/**
+ * Pure, finite-safe developable page-curl mathematics in canonical page
+ * coordinates: hinge on x = 0, free edge on x = W, y in [-H/2, +H/2].
+ */
 object CurlSolver {
-    private const val EPSILON = 1e-9
-    private const val DEFAULT_EXTENT = 1.0
+    private const val EPS = 1e-9
+    private const val FOLD_RADIUS_EPS = 1e-4
+
+    fun toCanonical(point: Vec2, side: PageSide): Vec2 =
+        if (side == PageSide.LEFT) Vec2(-point.x, point.y) else point
+
+    fun fromCanonical(point: Vec2, side: PageSide): Vec2 =
+        if (side == PageSide.LEFT) Vec2(-point.x, point.y) else point
 
     fun constrainTarget(grab: Vec2, target: Vec2, pageWidth: Double, pageHeight: Double): Vec2 {
-        val width = safeExtent(pageWidth)
-        val height = safeExtent(pageHeight)
-        val start = Vec2(grab.x.finiteOrZero().coerceIn(0.0, width), grab.y.finiteOrZero().coerceIn(0.0, height))
-        val requested = Vec2(target.x.finiteOrZero(), target.y.finiteOrZero())
-        val delta = requested - start
-        if (delta.length() <= EPSILON) return start
+        val w = clampNonNegative(finiteNumber(pageWidth, 0.0))
+        val h = clampNonNegative(finiteNumber(pageHeight, 0.0))
+        val g = sanitizePoint(grab, Vec2(w, 0.0))
+        var q = sanitizePoint(target, g)
+        if (!q.isFinite() || !g.isFinite()) return g
 
-        var maximumT = 1.0
-        if (delta.x < -EPSILON) maximumT = min(maximumT, (0.0 - start.x) / delta.x)
-        if (delta.x > EPSILON) maximumT = min(maximumT, (width - start.x) / delta.x)
-        if (delta.y < -EPSILON) maximumT = min(maximumT, (0.0 - start.y) / delta.y)
-        if (delta.y > EPSILON) maximumT = min(maximumT, (height - start.y) / delta.y)
-        val t = maximumT.coerceIn(0.0, 1.0)
-        return (start + delta * t).let { point ->
-            Vec2(point.x.coerceIn(0.0, width), point.y.coerceIn(0.0, height))
+        val (hingeTop, hingeBottom) = hinges(h)
+        val topRadius = (g - hingeTop).length()
+        val bottomRadius = (g - hingeBottom).length()
+
+        repeat(4) {
+            q = projectDisk(q, hingeTop, topRadius)
+            q = projectDisk(q, hingeBottom, bottomRadius)
         }
+
+        val drag = g - q
+        val dragLength = drag.length()
+        if (dragLength > EPS && dragLength.isFinite()) {
+            val normal = drag * (1.0 / dragLength)
+            val allowance = -maxOf(
+                (hingeTop - g) dot normal,
+                (hingeBottom - g) dot normal,
+            )
+            val safeLength = maxOf(0.0, 2.0 * allowance)
+            if (dragLength > safeLength) q = g - normal * safeLength
+        }
+        return if (q.isFinite()) q else g
     }
 
     fun solve(
@@ -36,82 +57,176 @@ object CurlSolver {
         pageHeight: Double,
         requestedRadius: Double,
     ): CurlState {
-        val width = safeExtent(pageWidth)
-        val height = safeExtent(pageHeight)
-        val safeGrab = Vec2(
-            grab.x.finiteOrZero().coerceIn(0.0, width),
-            grab.y.finiteOrZero().coerceIn(0.0, height),
-        )
-        val constrained = constrainTarget(safeGrab, target, width, height)
-        val radius = when {
-            !requestedRadius.isFinite() -> width * 0.05
-            requestedRadius <= 0.0 -> 0.0
-            else -> requestedRadius.coerceAtMost(width * 4.0 + height * 4.0)
-        }
-        val translation = constrained - safeGrab
-        val flat = translation.length() <= EPSILON
-        val direction = normalized(translation)
-        val normal = Vec2(-direction.y, direction.x)
-        val band = if (radius > EPSILON) radius.coerceAtMost(width) else 0.0
-        val start = (constrained.x - band).coerceIn(0.0, width)
-        val end = (constrained.x + band).coerceIn(start, width)
-        val depth = if (radius > EPSILON) radius * (1.0 - cos(min(Math.PI, translation.length() / radius))) else 0.0
-        val angle = if (radius > EPSILON) {
-            (translation.length() / radius).coerceIn(-Math.PI, Math.PI) * if (translation.x < 0.0) -1.0 else 1.0
-        } else {
-            Math.PI
-        }
-        val pivot = Vec2(start, safeGrab.y)
-        return CurlState(
-            grab = safeGrab,
-            target = constrained,
-            pageWidth = width,
-            pageHeight = height,
+        val w = clampNonNegative(finiteNumber(pageWidth, 0.0))
+        val h = clampNonNegative(finiteNumber(pageHeight, 0.0))
+        val g = sanitizePoint(grab, Vec2(w, 0.0))
+        val rawTarget = sanitizePoint(target, g)
+        val q = constrainTarget(g, rawTarget, w, h)
+        val delta = g - q
+        val l = delta.length()
+        val n = normalize(delta, Vec2(1.0, 0.0))
+        val t = Vec2(-n.y, n.x)
+        val (hingeTop, hingeBottom) = hinges(h)
+        var allowance = -maxOf((hingeTop - g) dot n, (hingeBottom - g) dot n)
+        if (!allowance.isFinite()) allowance = 0.0
+
+        val requested = maxOf(0.0, finiteNumber(requestedRadius, w * 0.05))
+        var radius = if (l <= EPS) 0.0 else requested
+        if (radius > 0.0) radius = minOf(radius, maxOf(0.0, (2.0 * allowance - l) / Math.PI))
+
+        val dG = solveDistance(l, radius)
+        val state = CurlState(
+            grab = g,
+            target = q,
+            pageWidth = w,
+            pageHeight = h,
             radius = radius,
-            foldStart = start,
-            foldEnd = end,
-            translation = translation,
-            bendNormal = normal,
-            bendDepth = depth.finiteOrZero(),
-            bendAngle = angle.finiteOrZero(),
-            bendPivot = pivot,
-            isFlat = flat,
+            axisPoint = g - n * dG,
+            axisNormal = n,
+            axisTangent = t,
+            grabDistance = l,
+            progress = if (w > EPS) l / w else if (l > EPS) 1.0 else 0.0,
+            phase = when {
+                l <= EPS -> CurlState.Phase.FLAT
+                radius < FOLD_RADIUS_EPS -> CurlState.Phase.FOLD
+                else -> CurlState.Phase.CURL
+            },
+            finite = false,
         )
-    }
-
-    fun deformPoint(point: Vec2, state: CurlState): Vec2 {
-        val safePoint = Vec2(point.x.finiteOrZero(), point.y.finiteOrZero())
-        if (safePoint == state.grab) return state.target
-        if (abs(safePoint.x) <= EPSILON) return Vec2(0.0, safePoint.y)
-        if (state.isFlat) return safePoint
-
-        val start = state.foldStart
-        val end = state.foldEnd
-        if (safePoint.x < start - EPSILON) return safePoint
-        if (end - start <= EPSILON) return safePoint + state.translation
-        if (safePoint.x > end + EPSILON) return safePoint + state.translation
-
-        return rotateAround(safePoint, state.bendPivot, state.bendAngle)
-    }
-
-    private fun rotateAround(point: Vec2, pivot: Vec2, angle: Double): Vec2 {
-        val cosine = cos(angle)
-        val sine = sin(angle)
-        val dx = point.x - pivot.x
-        val dy = point.y - pivot.y
-        return Vec2(
-            pivot.x + dx * cosine - dy * sine,
-            pivot.y + dx * sine + dy * cosine,
+        val safe = state.copy(
+            progress = state.progress.coerceIn(0.0, 1.0),
+            finite = allFiniteState(state),
         )
+        if (!safe.finite) {
+            return CurlState(
+                grab = g,
+                target = g,
+                pageWidth = w,
+                pageHeight = h,
+                radius = 0.0,
+                axisPoint = g,
+                axisNormal = Vec2(1.0, 0.0),
+                axisTangent = Vec2(0.0, 1.0),
+                grabDistance = 0.0,
+                progress = 0.0,
+                phase = CurlState.Phase.FLAT,
+                finite = true,
+            )
+        }
+        return safe
     }
 
-    private fun normalized(vector: Vec2): Vec2 {
-        val length = vector.length()
-        return if (length.isFinite() && length > EPSILON) vector * (1.0 / length) else Vec2(0.0, 0.0)
+    fun deformPoint(point: Vec2, state: CurlState): DeformedPoint {
+        val p = sanitizePoint(point, Vec2(0.0, 0.0))
+        val axisPoint = sanitizePoint(state.axisPoint, Vec2(0.0, 0.0))
+        val n = normalize(sanitizePoint(state.axisNormal, Vec2(1.0, 0.0)), Vec2(1.0, 0.0))
+        val t = normalize(Vec2(-n.y, n.x), Vec2(-n.y, n.x))
+        val r = maxOf(0.0, finiteNumber(state.radius, 0.0))
+        val grabDistance = finiteNumber(state.grabDistance, 0.0)
+        if (grabDistance <= EPS) {
+            return DeformedPoint(p.x, p.y, 0.0, 0.0, 0.0, 1.0, DeformedPoint.Region.FLAT_FRONT)
+        }
+
+        val rel = p - axisPoint
+        val d = rel dot n
+        val s = rel dot t
+        val lat: Double
+        val z: Double
+        val nx: Double
+        val ny: Double
+        val nz: Double
+        val region: DeformedPoint.Region
+        if (d <= 0.0) {
+            lat = d; z = 0.0; nx = 0.0; ny = 0.0; nz = 1.0
+            region = DeformedPoint.Region.FLAT_FRONT
+        } else if (r >= FOLD_RADIUS_EPS && d < Math.PI * r) {
+            val angle = d / r
+            lat = r * sin(angle)
+            z = r * (1.0 - cos(angle))
+            nx = -sin(angle) * n.x
+            ny = -sin(angle) * n.y
+            nz = cos(angle)
+            region = DeformedPoint.Region.CYLINDRICAL_WRAP
+        } else {
+            lat = -(d - Math.PI * r)
+            z = 2.0 * r
+            nx = 0.0; ny = 0.0; nz = -1.0
+            region = DeformedPoint.Region.FLAT_BACK
+        }
+        val out = axisPoint + t * s + n * lat
+        return DeformedPoint(out.x, out.y, z, nx, ny, nz, region)
     }
 
-    private fun safeExtent(value: Double): Double =
-        if (value.isFinite() && value > EPSILON) value else DEFAULT_EXTENT
+    sealed interface ReleaseDecision {
+        data object Commit : ReleaseDecision
+        data object Cancel : ReleaseDecision
+    }
 
-    private fun Double.finiteOrZero(): Double = if (isFinite()) this else 0.0
+    fun decideRelease(
+        progress: Double,
+        velocity: Any?,
+        cancelled: Boolean,
+    ): ReleaseDecision {
+        if (cancelled) return ReleaseDecision.Cancel
+        val clampedProgress = finiteNumber(progress, 0.0).coerceIn(0.0, 1.0)
+        val velocityValue = when (velocity) {
+            is VelocitySample -> if (velocity.ageMs.isFinite() && velocity.ageMs > 120.0) 0.0 else finiteNumber(velocity.value, 0.0)
+            is Number -> finiteNumber(velocity.toDouble(), 0.0)
+            else -> 0.0
+        }
+        if (velocityValue < -0.45) return ReleaseDecision.Cancel
+        return if (clampedProgress >= 0.5 || velocityValue > 0.45) ReleaseDecision.Commit else ReleaseDecision.Cancel
+    }
+
+    private fun solveDistance(l: Double, r: Double): Double {
+        if (l <= EPS) return 0.0
+        if (r < FOLD_RADIUS_EPS) return l / 2.0
+        if (l <= Math.PI * r) {
+            var lo = 0.0
+            var hi = Math.PI * r
+            repeat(18) {
+                val mid = (lo + hi) / 2.0
+                val f = mid - r * sin(mid / r)
+                if (f < l) lo = mid else hi = mid
+            }
+            return (lo + hi) / 2.0
+        }
+        return (l + Math.PI * r) / 2.0
+    }
+
+    private fun projectDisk(q: Vec2, center: Vec2, radius: Double): Vec2 {
+        val delta = q - center
+        val d = delta.length()
+        if (!d.isFinite() || !radius.isFinite() || radius < 0.0) return center
+        if (d <= radius || d <= EPS) return q
+        return center + delta * (radius / d)
+    }
+
+    private fun hinges(pageHeight: Double): Pair<Vec2, Vec2> {
+        val h = maxOf(0.0, finiteNumber(pageHeight, 0.0))
+        return Vec2(0.0, -h / 2.0) to Vec2(0.0, h / 2.0)
+    }
+
+    private fun normalize(vector: Vec2, fallback: Vec2): Vec2 {
+        val len = vector.length()
+        return if (len > EPS && len.isFinite()) vector * (1.0 / len) else fallback
+    }
+
+    private fun sanitizePoint(point: Vec2, fallback: Vec2): Vec2 =
+        Vec2(
+            finiteNumber(point.x, fallback.x),
+            finiteNumber(point.y, fallback.y),
+        )
+
+    private fun allFiniteState(state: CurlState): Boolean =
+        state.axisPoint.isFinite() && state.axisNormal.isFinite() && state.axisTangent.isFinite() &&
+            state.radius.isFinite() && state.grabDistance.isFinite() && state.progress.isFinite() &&
+            state.target.isFinite() && state.grab.isFinite()
+
+    private fun finiteNumber(value: Double, fallback: Double): Double =
+        if (value.isFinite()) value else fallback
+
+    private fun clampNonNegative(value: Double): Double = maxOf(0.0, value)
+
+    private infix fun Vec2.dot(other: Vec2): Double = x * other.x + y * other.y
 }
