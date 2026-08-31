@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Arknights Reader</string>
+    <string name="unofficial_reader">本地阅读器 · 非官方</string>
+    <string name="local_validation_notice">内置内容只用于本地验证</string>
+</resources>

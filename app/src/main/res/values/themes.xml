@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.ArknightsReader" parent="android:style/Theme.Material.Light.NoActionBar" />
+</resources>
