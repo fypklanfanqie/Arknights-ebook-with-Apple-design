@@ -1,5 +1,6 @@
 package com.lfq06.arknightsreader.ui.theme
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -20,8 +21,9 @@ private val DarkColors = darkColorScheme(
 
 @Composable
 fun ArknightsReaderTheme(content: @Composable () -> Unit) {
+    val darkTheme = isSystemInDarkTheme()
     MaterialTheme(
-        colorScheme = LightColors,
+        colorScheme = if (darkTheme) DarkColors else LightColors,
         typography = ReaderTypography,
         content = content,
     )
