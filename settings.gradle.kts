@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "ArknightsReader"
 include(":app")
 include(":reader:turn")
+include(":reader:turngl")
