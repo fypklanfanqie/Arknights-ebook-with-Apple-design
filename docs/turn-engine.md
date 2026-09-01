@@ -1,7 +1,10 @@
 # Turn Engine Pipeline
 
-Status: Task 4 (Page Curl Lab). The math kernel is stable and fully tested;
-the GL/touch layers are build-verified and ready for on-device validation.
+Status: Task 4 (Page Curl Lab). The math kernel is stable and fully tested.
+The GL/touch layers compile and pass JVM contract tests after the review-fix
+round (shader uniform declaration, VBO wiring, params plumbing, projection
+coverage, thread ownership); they still await on-device validation — the
+page-curl render path has never executed against real GLES/EGL.
 
 ## Modules
 
@@ -15,7 +18,8 @@ reader/turn    pure Kotlin/JVM — no Android deps
 reader/turngl  Android library — GL plumbing, no touch handling
   CurlShaderProgram   embedded GLSL ES sources (vertex + fragment)
   CurlShaderMath      JVM mirror of the shader's piecewise deformation
-  CurlMeshBuffers     VBO staging + capacity math
+  CurlProjection      pure-Kotlin frustum/MVP math (JVM-testable; C-4 coverage)
+  CurlMeshBuffers     VBO staging + capacity math (proxy-driven, GL-tested)
   CurlGLRenderer      GLES-free lifecycle state machine (NEW -> READY -> ERROR/RELEASED)
   CurlTextureHost     frame-pacing brain (request coalescing, dirty mode, stop)
   CurlTextureViewHost TextureView.SurfaceTextureListener + EGL14 + render thread
@@ -38,7 +42,8 @@ MotionEvent (UI thread)
   -> CurlSolver.constrainTarget      Q clamped to hinge-reach disks and 2*allowance
   -> CurlSolver.solve                axis point/normal, radius cap, progress, phase
   -> CurlMesh.build                  seam-aligned grid into a REUSED MeshOutput (zero alloc on drag)
-  -> CurlTextureViewHost.updateMesh  UI thread stores MeshResult; render thread streams VBO
+  -> CurlTextureViewHost.uploadMesh  render thread streams the VBO (build + upload both on the
+                                     render thread; the UI thread only feeds the reducer)
   -> CurlEglFrame.draw               front pass (uIsBack=0, +halfThickness), back pass (uIsBack=1, -halfThickness)
 ```
 
@@ -56,6 +61,10 @@ The vertex shader reproduces `CurlSolver.deformPoint` exactly:
 | flat back | d >= PI*r | -(d - PI*r) | 2r | -z |
 
 `d = dot(p - uAxisPoint, n)` is the signed distance in material space.
+**`uAxisNormal` must be non-zero**: the vertex shader normalizes it, and
+GLSL `normalize(vec2(0))` is undefined — a zero normal would poison the
+whole deformation. CurlMesh.build already guards this with a (1, 0)
+fallback; any new producer of frame params must do the same.
 `CurlShaderMath.deform` is a JVM mirror of this mapping;
 `CurlShaderMathTest` fails if it drifts from `CurlSolver.deformPoint`, and
 `CurlShaderProgramSourceTest` locks the GLSL source contract (uniforms,
@@ -81,6 +90,16 @@ never mid-drag; the lab has no database at all).
 - `release()` paths are idempotent (`CurlGLRenderer.release`,
   `CurlTextureHost.stop`, `CurlTextureViewHost.stop`).
 
+## Threading contract
+
+- UI thread: touch events -> `TurnGesture` reducer; pushes nothing into GL.
+- Render thread ("curl-render"): owns EGL + all GLES calls; runs solve ->
+  `CurlMesh.build` (shared `MeshOutput`) -> VBO upload -> draw, and draws the
+  params returned by the frame listener THIS tick.
+- Shared state between them is limited to immutable snapshots: gesture state
+  (`TurnGestureState` data class), `CurlFrameParams`, and settle endpoints
+  (volatile fields). The `MeshOutput` arrays are render-thread-private.
+
 ## Known limitations
 
 - Single-page forward drag only in the lab (dir is resolved but backward
@@ -93,6 +112,17 @@ never mid-drag; the lab has no database at all).
 - Commit settle animates geometry only; no page-swap occurs (next task).
 
 ## Device verification
+
+After the review-fix round the following still needs a real device:
+
+- Shader actually compiles/links on real GLES drivers (JVM tests lock the
+  source contract but cannot run the GLSL compiler).
+- Curl visible and unclipped at max radius (C-4 projection coverage).
+- Checkerboard on both faces with correct mirroring; crease shading.
+- Settle animation renders from the returned params (C-3) — no one-frame lag.
+- destroy -> re-available cycle keeps rendering (I-6).
+- No texture upload from the UI thread (I-1): texture appears after EGL init,
+  no GL warnings.
 
 ```bash
 # build + install
