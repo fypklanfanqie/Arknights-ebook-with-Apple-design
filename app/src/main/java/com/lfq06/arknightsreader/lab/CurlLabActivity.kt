@@ -25,11 +25,18 @@ import com.lfq06.arknightsreader.turngl.CurlTextureView
  * Layout: one [CurlTextureView] fills the screen; a status bar at the bottom
  * prints gesture phase / curl progress / radius / axis each frame.
  *
+ * Thread contract (I-4):
+ * - The UI thread routes touch events into the pure reducer
+ *   ([CurlLabPipeline]) and pushes gesture progress; it never touches the
+ *   mesh output or GL state.
+ * - The render thread (host frame listener -> [prepareFrame]) does solve +
+ *   CurlMesh.build + VBO upload, then RETURNS the params for this tick (C-3),
+ *   so what is drawn is always the freshly computed snapshot.
+ *
  * Touch pipeline (per event): clientToCanonical -> resolveDragDirection ->
- * Press/Move/Armed/Release into the pure reducer; every drag frame runs
- * constrained Q -> CurlSolver.solve -> CurlMesh.build (reused output) ->
- * mesh upload -> render request. Textures are pre-generated at idle, so a
- * drag performs zero Bitmap work and zero full texture uploads.
+ * Press/Move/Armed/Release into the pure reducer. Textures are pre-generated
+ * at idle and uploaded once after EGL is ready, so a drag performs zero
+ * Bitmap work and zero full texture uploads.
  */
 class CurlLabActivity : Activity() {
 
@@ -44,14 +51,25 @@ class CurlLabActivity : Activity() {
     private var armed = false
     private var pointerId = -1
 
-    // Settle animation state.
+    // Settle animation state. Written on the UI thread (release path), read on
+    // the render thread (prepareFrame); the host's dirty flag keeps the loop
+    // spinning while the animation is in flight.
+    @Volatile
     private var settleFrom: CurlFrameParams? = null
+
+    @Volatile
     private var settleTo: CurlFrameParams? = null
+
+    @Volatile
+    private var settleIsCommit = false
+
     private var settleStartMs = 0L
-    private var settleRunnable: Runnable? = null
 
     private var frontBitmap: Bitmap? = null
     private var backBitmap: Bitmap? = null
+
+    /** True once textures reached GL after EGL was ready (I-1 semantics). */
+    @Volatile
     private var texturesUploaded = false
 
     private val slopPx by lazy { ViewConfiguration.get(this).scaledTouchSlop }
@@ -83,10 +101,8 @@ class CurlLabActivity : Activity() {
         setContentView(root)
 
         pipeline = CurlLabPipeline()
-        textureView.host.frameListener = object : com.lfq06.arknightsreader.turngl.CurlTextureViewHost.FrameListener {
-            override fun onPrepareFrame(): Boolean {
-                return prepareFrame()
-            }
+        textureView.host.frameListener = com.lfq06.arknightsreader.turngl.CurlTextureViewHost.FrameListener {
+            prepareFrame()
         }
         textureView.host.onEglReady = { uploadTextures() }
 
@@ -145,10 +161,19 @@ class CurlLabActivity : Activity() {
             baseB = 0xFFA8C2D8.toInt(),
         )
         texturesUploaded = false
-        uploadTextures()
+        // I-1: no immediate GL upload from the UI thread. If EGL is already
+        // ready, the host queues a frame whose prepare path uploads; otherwise
+        // onEglReady fires later and uploads then.
+        if (textureView.isRendererRunning()) {
+            textureView.requestFrame()
+        }
     }
 
-    /** Uploads textures to GL once the renderer is ready; safe to call twice. */
+    /**
+     * Uploads textures to GL once the renderer is ready. Called from the
+     * render thread only (onEglReady or the first prepared frame); safe to
+     * call twice (I-1: the UI-thread immediate upload path was removed).
+     */
     private fun uploadTextures() {
         val fb = frontBitmap ?: return
         val bb = backBitmap ?: return
@@ -157,50 +182,49 @@ class CurlLabActivity : Activity() {
         texturesUploaded = true
     }
 
-    private fun prepareFrame(): Boolean {
+    /**
+     * Runs on the render thread. Solves + builds the mesh + uploads it, then
+     * RETURNS the params to draw this tick (C-3: the returned snapshot is what
+     * reaches the GPU, never a stale cached field).
+     */
+    private fun prepareFrame(): CurlFrameParams? {
+        uploadTextures()
         // Drag in flight: solve + mesh build + upload on the render thread.
         if (pipeline.gestureState.phase == TurnPhase.DRAGGING ||
             pipeline.gestureState.phase == TurnPhase.PRESSING ||
             pipeline.gestureState.phase == TurnPhase.ARMING
         ) {
-            pipeline.frameFor()?.let { params ->
-                pipeline.lastMesh?.let { mesh ->
-                    textureView.host.updateMesh(mesh)
-                }
-                drawParams = params
-                return true
+            val drag = pipeline.frameFor()
+            if (drag != null) {
+                pipeline.lastMesh?.let { mesh -> textureView.host.uploadMesh(mesh) }
+                return drag
             }
         }
         // Settle animation in flight.
-        settleTo?.let { to ->
-            settleFrom?.let { from ->
-                val t = ((System.currentTimeMillis() - settleStartMs) / SETTLE_MS).coerceIn(0.0, 1.0)
-                val e = easeInOut(t)
-                drawParams = lerpParams(from, to, e)
-                if (t >= 1.0) {
-                    val wasCommit = settleIsCommit
-                    settleFrom = null
-                    settleTo = null
-                    settleIsCommit = false
-                    pipeline.clearOutcome()
-                    if (wasCommit) {
-                        // Reset the page to flat for the next turn (real page
-                        // swap is the next task's job).
-                        drawParams = idleParams()
-                    }
-                    runOnUiThread { textureView.setDirty(false) }
+        val to = settleTo
+        val from = settleFrom
+        if (to != null && from != null) {
+            val t = ((System.currentTimeMillis() - settleStartMs) / SETTLE_MS).coerceIn(0.0, 1.0)
+            val e = easeInOut(t)
+            val lerped = lerpParams(from, to, e)
+            if (t >= 1.0) {
+                val wasCommit = settleIsCommit
+                settleFrom = null
+                settleTo = null
+                settleIsCommit = false
+                pipeline.clearOutcome()
+                if (wasCommit) {
+                    // Reset the page to flat for the next turn (real page
+                    // swap is the next task's job).
+                    return idleParams()
                 }
-                return true
+                runOnUiThread { textureView.setDirty(false) }
             }
+            return lerped
         }
-        // Flat idle: draw the page once after params changes.
-        drawParams = drawParams ?: idleParams()
-        return true
+        // Flat idle: draw the page at its idle pose.
+        return idleParams()
     }
-
-    private var drawParams: CurlFrameParams? = null
-
-    private var settleIsCommit = false
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
@@ -250,8 +274,8 @@ class CurlLabActivity : Activity() {
                         startSettle(outcome)
                     } else {
                         // Never left PRESSING: snap back to flat.
-                        drawParams = idleParams()
                         pipeline.clearOutcome()
+                        textureView.requestFrame()
                     }
                 }
                 velocityTracker?.recycle()
@@ -265,7 +289,8 @@ class CurlLabActivity : Activity() {
 
     /** Kicks the 300 ms ease settle toward the commit/cancel end state. */
     private fun startSettle(outcome: TurnOutcome) {
-        val from = drawParams ?: idleParams()
+        // From the last solved curl (if any); otherwise start flat.
+        val from = pipeline.lastCurl?.let { pipeline.paramsFor(it) } ?: idleParams()
         val to = when (outcome) {
             TurnOutcome.Commit -> CurlFrameParams(
                 axisPoint = Vec2(0.0, 0.0),
@@ -297,6 +322,7 @@ class CurlLabActivity : Activity() {
     }
 
     private fun updateStatus() {
+        if (isDestroyed || isFinishing) return
         statusView.text = pipeline.statusLine()
         statusView.postDelayed({ updateStatus() }, 66)
     }
@@ -323,6 +349,8 @@ class CurlLabActivity : Activity() {
         if (t < 0.5) 2.0 * t * t else 1.0 - 2.0 * (1.0 - t) * (1.0 - t)
 
     override fun onDestroy() {
+        // I-8: kill the status bar self-rescheduling loop.
+        statusView.removeCallbacks(null)
         textureView.host.stop()
         super.onDestroy()
     }

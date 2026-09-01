@@ -263,8 +263,6 @@ class CurlLabPipeline(
         }
     }
 
-    private fun pageScale(): Double = if (pageRect.width > 1e-9) pageW / pageRect.width else 1.0
-
     private val TurnPhase.isActive: Boolean
         get() = this == TurnPhase.PRESSING || this == TurnPhase.ARMING || this == TurnPhase.DRAGGING
 }

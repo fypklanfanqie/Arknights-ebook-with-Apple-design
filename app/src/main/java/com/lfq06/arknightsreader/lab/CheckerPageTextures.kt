@@ -53,16 +53,25 @@ object CheckerPageTextures {
         val bmp = Bitmap.createBitmap(layout.width, layout.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         val cell = Paint()
+        // Ceiling semantics: integer cellW truncates, which would leave a
+        // transparent strip on the right/bottom edge; stretch the last
+        // row/column to the bitmap edge instead.
         for (iy in 0 until layout.cellsY) {
+            val top = (iy * layout.cellH).toFloat()
+            val bottom = if (iy == layout.cellsY - 1) {
+                layout.height.toFloat()
+            } else {
+                ((iy + 1) * layout.cellH).toFloat()
+            }
             for (ix in 0 until layout.cellsX) {
+                val left = (ix * layout.cellW).toFloat()
+                val right = if (ix == layout.cellsX - 1) {
+                    layout.width.toFloat()
+                } else {
+                    ((ix + 1) * layout.cellW).toFloat()
+                }
                 cell.color = if ((ix + iy) % 2 == 0) baseA else baseB
-                canvas.drawRect(
-                    (ix * layout.cellW).toFloat(),
-                    (iy * layout.cellH).toFloat(),
-                    ((ix + 1) * layout.cellW).toFloat(),
-                    ((iy + 1) * layout.cellH).toFloat(),
-                    cell,
-                )
+                canvas.drawRect(left, top, right, bottom, cell)
             }
         }
         val inkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ink }
