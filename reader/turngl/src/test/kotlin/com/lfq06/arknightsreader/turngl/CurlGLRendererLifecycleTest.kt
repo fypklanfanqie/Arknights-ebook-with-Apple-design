@@ -1,5 +1,6 @@
 package com.lfq06.arknightsreader.turngl
 
+import java.nio.FloatBuffer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -89,6 +90,34 @@ class CurlGLRendererLifecycleTest {
         override fun glViewport(x: Int, y: Int, w: Int, h: Int) {
             calls += "viewport"
         }
+
+        val boundAttribs = mutableListOf<Pair<Int, String>>()
+
+        override fun glBindAttribLocation(program: Int, index: Int, name: String) {
+            calls += "bindAttribLocation:$index:$name"
+            boundAttribs += index to name
+        }
+
+        override fun glGenBuffers(buffers: IntArray) {
+            calls += "genBuffers"
+            for (i in buffers.indices) buffers[i] = 100 + i
+        }
+
+        override fun glDeleteBuffers(buffers: IntArray) {
+            calls += "deleteBuffers"
+        }
+
+        override fun glBindBuffer(target: Int, buffer: Int) {
+            calls += "bindBuffer:$buffer"
+        }
+
+        override fun glBufferData(target: Int, size: Int, data: FloatBuffer?, usage: Int) {
+            calls += "bufferData"
+        }
+
+        override fun glBufferSubData(target: Int, offset: Int, size: Int, data: FloatBuffer) {
+            calls += "bufferSubData"
+        }
     }
 
     @Test
@@ -176,5 +205,18 @@ class CurlGLRendererLifecycleTest {
         renderer.release()
         assertFalse(renderer.isReady)
         assertSame(CurlGLRenderer.Lifecycle.RELEASED, renderer.lifecycle, "lifecycle must end released")
+    }
+
+    @Test
+    fun `attribute locations are bound before link (I-7)`() {
+        val proxy = RecordingProxy()
+        val renderer = CurlGLRenderer(proxy)
+        renderer.initialize()
+        val linkIdx = proxy.calls.indexOfFirst { it == "linkProgram" }
+        val posBind = proxy.calls.indexOfFirst { it == "bindAttribLocation:0:position" }
+        val uvBind = proxy.calls.indexOfFirst { it == "bindAttribLocation:1:uv" }
+        assertTrue(linkIdx >= 0, "program must be linked")
+        assertTrue(posBind in 0 until linkIdx, "position bind must precede link (bind=$posBind, link=$linkIdx)")
+        assertTrue(uvBind in posBind + 1 until linkIdx, "uv bind must precede link (bind=$uvBind, link=$linkIdx)")
     }
 }

@@ -4,9 +4,6 @@ import android.graphics.Bitmap
 import android.opengl.EGLSurface
 import android.opengl.GLES20
 import android.opengl.GLUtils
-import android.opengl.Matrix
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
@@ -17,21 +14,25 @@ import java.nio.FloatBuffer
  * Draw model per frame (matches the reference engine's material split):
  * 1. Front pass: cull back faces, uIsBack = 0, offset = +halfThickness.
  * 2. Back pass: cull front faces, uIsBack = 1, offset = -halfThickness.
- * Both passes share the same VBO geometry; the sub-pixel normal offset keeps
- * the two sheets from fighting over the same depth.
+ * Both passes share the same VBO geometry (owned by [CurlMeshBuffers]); the
+ * sub-pixel normal offset keeps the two sheets from fighting over the same
+ * depth.
+ *
+ * Projection (C-4): the page lies in the z = 0 plane; the curl lifts vertices
+ * up to z = 2*r (r up to radiusFraction * pageW). A perspective camera sits on
+ * the eye axis through the page center at [EYE_Z]; the frustum is scaled so
+ * the z = 0 plane maps 1:1 onto the viewport, keeping the flat page pixel-
+ * exact while the curled part gains a slight perspective foreshortening. Near
+ * and far planes cover [zMin, 2r + margin], so the curl top is never clipped.
  */
 object CurlEglFrame {
 
     private var program = 0
     private var uniformsReady = false
-    private var attribPosition = 0
-    private var attribUv = 0
     private var uMvp = 0
     private var uAxisPoint = 0
     private var uAxisNormal = 0
     private var uRadius = 0
-    private var uPageW = 0
-    private var uPageH = 0
     private var uOffset = 0
     private var uFront = 0
     private var uBack = 0
@@ -41,7 +42,6 @@ object CurlEglFrame {
 
     private var frontTex = 0
     private var backTex = 0
-    private var vbo = 0
 
     private val mvp = FloatArray(16)
     private val proj = FloatArray(16)
@@ -51,24 +51,39 @@ object CurlEglFrame {
     private const val LIGHT_Y = -0.35f
     private const val LIGHT_Z = 0.9f
 
+    /** Eye distance of the perspective camera, in page pixels. */
+    const val EYE_Z = 1200f
+
+    /**
+     * Safety margin above the maximum curl height (2 * r) added to the far
+     * plane, in page pixels.
+     */
+    const val CURL_Z_MARGIN = 8f
+
+    /**
+     * Minimum curl height the near/far planes must cover even when the current
+     * radius is 0, so a radius ramp-up between frames can never pop the curl
+     * out of the frustum. Expressed as a fraction of page width.
+     */
+    const val MIN_CURL_FRACTION = 0.1f
+
+    const val DEFAULT_COLS = 24
+    const val DEFAULT_ROWS = 16
+
     /**
      * One-shot setup: must be called on the EGL thread after
-     * [CurlGLRenderer.initialize] succeeded. Builds the program, caches
-     * uniform/attribute locations, and creates the VBO.
+     * [CurlGLRenderer.initialize] succeeded. Caches the program handle,
+     * uniform locations and texture handles. The VBO is owned by
+     * [CurlMeshBuffers] (bound before link by the renderer), and attribute
+     * locations are the constants bound at link time.
      */
     fun setup(renderer: CurlGLRenderer, buffers: CurlMeshBuffers) {
         if (program != 0 || !renderer.isReady) return
         program = renderer.programHandle
-        attribPosition = GLES20.glGetAttribLocation(program, "position")
-        attribUv = GLES20.glGetAttribLocation(program, "uv")
-        GLES20.glBindAttribLocation(program, CurlShaderProgram.ATTR_POSITION, "position")
-        GLES20.glBindAttribLocation(program, CurlShaderProgram.ATTR_UV, "uv")
         uMvp = GLES20.glGetUniformLocation(program, CurlShaderProgram.MVP_UNIFORM)
         uAxisPoint = GLES20.glGetUniformLocation(program, "uAxisPoint")
         uAxisNormal = GLES20.glGetUniformLocation(program, "uAxisNormal")
         uRadius = GLES20.glGetUniformLocation(program, "uRadius")
-        uPageW = GLES20.glGetUniformLocation(program, "uPageW")
-        uPageH = GLES20.glGetUniformLocation(program, "uPageH")
         uOffset = GLES20.glGetUniformLocation(program, "uOffset")
         uFront = GLES20.glGetUniformLocation(program, "uFront")
         uBack = GLES20.glGetUniformLocation(program, "uBack")
@@ -79,19 +94,6 @@ object CurlEglFrame {
 
         frontTex = renderer.frontTextureHandle
         backTex = renderer.backTextureHandle
-
-        val ids = IntArray(1)
-        GLES20.glGenBuffers(1, ids, 0)
-        vbo = ids[0]
-        val floatCount = CurlMeshBuffers.floatCountFor(DEFAULT_COLS, DEFAULT_ROWS)
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-        GLES20.glBufferData(
-            GLES20.GL_ARRAY_BUFFER,
-            floatCount * 4,
-            null,
-            GLES20.GL_DYNAMIC_DRAW,
-        )
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
     }
 
     /** Uploads a Bitmap as one of the page textures. */
@@ -113,55 +115,32 @@ object CurlEglFrame {
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
     }
 
-    /** Streams a built mesh result into the VBO. */
-    fun updateMesh(buffers: CurlMeshBuffers, result: com.lfq06.arknightsreader.turn.CurlMesh.MeshResult) {
-        if (vbo == 0 || result.vertexCount <= 0) return
-        val floats = FloatBuffer.allocate(result.vertexCount * CurlMeshBuffers.FLOATS_PER_VERTEX)
-        for (i in 0 until result.vertexCount) {
-            floats.put(result.positions[i * 3])
-            floats.put(result.positions[i * 3 + 1])
-            floats.put(result.positions[i * 3 + 2])
-            floats.put(result.uvs[i * 2])
-            floats.put(result.uvs[i * 2 + 1])
-        }
-        floats.flip()
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-        GLES20.glBufferSubData(
-            GLES20.GL_ARRAY_BUFFER,
-            0,
-            result.vertexCount * CurlMeshBuffers.BYTES_PER_VERTEX,
-            floats,
-        )
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-    }
-
-    /** Draws one frame: front pass + back pass. */
-    fun draw(params: CurlFrameParams, renderer: CurlGLRenderer, buffers: CurlMeshBuffers, surface: EGLSurface) {
+    /**
+     * Draws one frame: front pass + back pass. [surfaceW]/[surfaceH] are the
+     * actual surface pixel dimensions (C-4: the viewport must track the
+     * surface, not the canonical page size); the page is centered inside it.
+     */
+    fun draw(
+        params: CurlFrameParams,
+        renderer: CurlGLRenderer,
+        buffers: CurlMeshBuffers,
+        surface: EGLSurface,
+        surfaceW: Int,
+        surfaceH: Int,
+    ) {
         if (program == 0 || !uniformsReady) return
         GLES20.glUseProgram(program)
-        GLES20.glViewport(0, 0, params.pageW.toInt().coerceAtLeast(1), params.pageH.toInt().coerceAtLeast(1))
+        // C-4: viewport in real surface pixels, not canonical page size.
+        val vpW = surfaceW.coerceAtLeast(1)
+        val vpH = surfaceH.coerceAtLeast(1)
+        GLES20.glViewport(0, 0, vpW, vpH)
 
-        // Orthographic-ish camera: the pipeline works in pixel units, so the
-        // projection just maps page pixels to clip space (flip y for GL).
-        val w = params.pageW.toFloat().coerceAtLeast(1f)
-        val h = params.pageH.toFloat().coerceAtLeast(1f)
-        Matrix.setLookAtM(view, 0, 0f, 0f, 3f, 0f, 0f, 0f, 0f, 1f, 0f)
-        val near = 2f
-        val far = 4f
-        val left = -w / 2f
-        val right = w / 2f
-        val bottom = -h / 2f
-        val top = h / 2f
-        // Column-major ortho with y flip handled by the view matrix above.
-        Matrix.frustumM(proj, 0, left * 0.9f, right * 0.9f, bottom * 0.9f, top * 0.9f, near, far)
-        Matrix.multiplyMM(mvp, 0, proj, 0, view, 0)
+        buildMvp(params, vpW, vpH)
 
         GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
         GLES20.glUniform2f(uAxisPoint, params.axisPoint.x.toFloat(), params.axisPoint.y.toFloat())
         GLES20.glUniform2f(uAxisNormal, params.axisNormal.x.toFloat(), params.axisNormal.y.toFloat())
         GLES20.glUniform1f(uRadius, params.radius.toFloat())
-        GLES20.glUniform1f(uPageW, params.pageW.toFloat())
-        GLES20.glUniform1f(uPageH, params.pageH.toFloat())
         GLES20.glUniform3f(uLight, LIGHT_X, LIGHT_Y, LIGHT_Z)
         GLES20.glUniform1f(uCreaseGain, CurlShaderProgram.U_CREASE_GAIN)
 
@@ -172,7 +151,7 @@ object CurlEglFrame {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, backTex)
         GLES20.glUniform1i(uBack, 1)
 
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+        GLES20.glBindBuffer(GlesConsts.ARRAY_BUFFER, buffers.bufferId)
         val stride = CurlMeshBuffers.BYTES_PER_VERTEX
         GLES20.glEnableVertexAttribArray(CurlShaderProgram.ATTR_POSITION)
         GLES20.glVertexAttribPointer(
@@ -184,21 +163,23 @@ object CurlEglFrame {
             3 * 4,
         )
 
+        val drawCount = buffers.drawCount
+
         // Front pass.
         GLES20.glUniform1f(uIsBack, 0f)
         GLES20.glUniform1f(uOffset, params.halfThickness.toFloat())
         GLES20.glCullFace(GLES20.GL_BACK)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, buffers.drawCount)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, drawCount)
 
         // Back pass.
         GLES20.glUniform1f(uIsBack, 1f)
         GLES20.glUniform1f(uOffset, -params.halfThickness.toFloat())
         GLES20.glCullFace(GLES20.GL_FRONT)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, buffers.drawCount)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, drawCount)
 
         GLES20.glDisableVertexAttribArray(CurlShaderProgram.ATTR_POSITION)
         GLES20.glDisableVertexAttribArray(CurlShaderProgram.ATTR_UV)
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+        GLES20.glBindBuffer(GlesConsts.ARRAY_BUFFER, 0)
 
         android.opengl.EGL14.eglSwapBuffers(
             android.opengl.EGL14.eglGetCurrentDisplay(),
@@ -206,23 +187,23 @@ object CurlEglFrame {
         )
     }
 
-    /** Frees VBO and clears cached handles; called from the EGL thread on teardown. */
+    /**
+     * Builds the MVP via [CurlProjection] (pure Kotlin, JVM-testable): C-4
+     * frustum covering the curl height and y-flip for the mesh-space down axis.
+     */
+    private fun buildMvp(params: CurlFrameParams, vpW: Int, vpH: Int) {
+        CurlProjection.mvp(params, vpW, vpH, mvp)
+    }
+
+    /** Frees cached handles; called from the EGL thread on teardown. */
     fun teardown() {
-        if (vbo != 0) {
-            val ids = intArrayOf(vbo)
-            GLES20.glDeleteBuffers(ids.size, ids, 0)
-            vbo = 0
-        }
         program = 0
         uniformsReady = false
         frontTex = 0
         backTex = 0
     }
 
-    const val DEFAULT_COLS = 24
-    const val DEFAULT_ROWS = 16
-
     /** Helper for tests: builds a direct native-order float buffer. */
     fun directFloatBuffer(count: Int): FloatBuffer =
-        ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        java.nio.ByteBuffer.allocateDirect(count * 4).order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
 }

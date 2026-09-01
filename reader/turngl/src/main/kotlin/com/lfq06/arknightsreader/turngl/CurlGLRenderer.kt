@@ -3,7 +3,7 @@ package com.lfq06.arknightsreader.turngl
 /**
  * GLES-free renderer lifecycle state machine, testable on the JVM via an
  * injected [GlesProxy]. The real draw path (program use, attribute binding,
- * draw calls) lives in [CurlEglRenderer]; this class owns shader/program/
+ * draw calls) lives in [CurlEglFrame]; this class owns shader/program/
  * texture handle management and the NEW -> READY -> RELEASED / ERROR states.
  */
 class CurlGLRenderer(private val gl: GlesProxy = RealGles) {
@@ -17,6 +17,8 @@ class CurlGLRenderer(private val gl: GlesProxy = RealGles) {
 
     val lifecycle: Lifecycle get() = lifecycleState
     val isReady: Boolean get() = lifecycleState == Lifecycle.READY
+    /** True after [release]; the host uses this to rebuild for a new cycle. */
+    val isReleased: Boolean get() = lifecycleState == Lifecycle.RELEASED
     val programHandle: Int get() = program
     val frontTextureHandle: Int get() = frontTexture
     val backTextureHandle: Int get() = backTexture
@@ -42,6 +44,12 @@ class CurlGLRenderer(private val gl: GlesProxy = RealGles) {
         program = gl.glCreateProgram()
         gl.glAttachShader(program, vs)
         gl.glAttachShader(program, fs)
+        // Attribute locations must be bound BEFORE linking (GLSL ES 2.0):
+        // binding after link has no effect on an already-linked program, which
+        // made the vertex attrib pointers nondeterministic. position = 0,
+        // uv = 1 matches CurlShaderProgram.ATTR_POSITION / ATTR_UV.
+        gl.glBindAttribLocation(program, CurlShaderProgram.ATTR_POSITION, "position")
+        gl.glBindAttribLocation(program, CurlShaderProgram.ATTR_UV, "uv")
         gl.glLinkProgram(program)
         gl.glDeleteShader(vs)
         gl.glDeleteShader(fs)
@@ -85,7 +93,7 @@ class CurlGLRenderer(private val gl: GlesProxy = RealGles) {
     /** Hook for subclasses / host: draws one frame. No-op unless READY. */
     fun render(params: CurlFrameParams) {
         if (lifecycleState != Lifecycle.READY) return
-        // The actual draw sequence lives in CurlEglRenderer.onDrawFrame; this
+        // The actual draw sequence lives in CurlEglFrame.draw; this
         // hook exists so callers always go through the lifecycle guard.
     }
 

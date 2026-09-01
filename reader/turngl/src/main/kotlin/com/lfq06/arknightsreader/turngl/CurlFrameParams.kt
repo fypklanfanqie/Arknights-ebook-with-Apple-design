@@ -5,7 +5,7 @@ import com.lfq06.arknightsreader.turn.Vec2
 /**
  * One drawable curl frame: geometry uniforms plus texture handles. Built by
  * the interaction layer from a [com.lfq06.arknightsreader.turn.CurlState] and
- * uploaded to the shader by [CurlGLRenderer.render].
+ * uploaded to the shader by [CurlEglFrame.draw].
  *
  * All fields are immutable; the renderer treats them as a pure description of
  * what to draw this tick.

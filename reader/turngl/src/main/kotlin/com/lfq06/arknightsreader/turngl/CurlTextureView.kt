@@ -17,7 +17,7 @@ class CurlTextureView @JvmOverloads constructor(
     defStyleAttr: Int = 0,
 ) : TextureView(context, attrs, defStyleAttr) {
 
-    val host = CurlTextureViewHost(this)
+    val host = CurlTextureViewHost()
 
     init {
         isOpaque = false
