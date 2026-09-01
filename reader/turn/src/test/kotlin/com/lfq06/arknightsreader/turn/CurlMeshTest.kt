@@ -294,28 +294,95 @@ class CurlMeshTest {
 
     @Test
     fun `nonfinite page dimensions and axis point degrade safely`() {
-        // NaN page size collapses the grid to a point; the builder must not throw
-        // and any output must stay finite.
+        // NaN page size collapses the grid to a point: the builder must emit no
+        // vertices at all (a real assertion, not a vacuous loop).
         val res1 = CurlMesh.build(
             pageW = Double.NaN, pageH = Double.NaN, originX = 0.0,
             cols = 40, rows = 24,
             axisPoint = Vec2(210.0, 0.0), axisNormal = Vec2(1.0, 0.6), radius = 21.0,
         )
-        for (i in 0 until res1.vertexCount) {
-            assertTrue(res1.positions[i * 3].isFinite())
-            assertTrue(res1.positions[i * 3 + 1].isFinite())
-        }
+        assertEquals(0, res1.vertexCount, "NaN page size must collapse to zero vertices")
 
-        // NaN axis point: distances become NaN, no triangle can be classified,
-        // but the builder must not throw or emit non-finite positions.
+        // A tiny but non-zero page runs the degenerate guard path: either the
+        // area filter skips everything (zero vertices) or whatever is emitted
+        // is finite. Both branches are asserted, so the test cannot pass by
+        // silently skipping a loop.
         val res2 = CurlMesh.build(
+            pageW = 1e-8, pageH = 1e-8, originX = 0.0,
+            cols = 40, rows = 24,
+            axisPoint = Vec2(5e-9, 0.0), axisNormal = Vec2(1.0, 0.6), radius = 21.0,
+        )
+        val allFinite = (0 until res2.vertexCount).all { i ->
+            res2.positions[i * 3].toDouble().isFinite() && res2.positions[i * 3 + 1].toDouble().isFinite()
+        }
+        assertTrue(
+            res2.vertexCount == 0 || allFinite,
+            "tiny page must emit nothing or only finite vertices (got ${res2.vertexCount})",
+        )
+    }
+
+    @Test
+    fun `nan axis point falls back to the page center`() {
+        // Pins the current fallback semantics: a fully non-finite axis point
+        // degrades to (originX + pageW / 2, 0) -- the page center in mesh
+        // coordinates -- and every vertex matches the explicit-center build.
+        val resNaN = CurlMesh.build(
             pageW = 420.0, pageH = 560.0, originX = 0.0,
             cols = 40, rows = 24,
-            axisPoint = Vec2(Double.NaN, 0.0), axisNormal = Vec2(1.0, 0.0), radius = 21.0,
+            axisPoint = Vec2(Double.NaN, Double.NaN), axisNormal = Vec2(1.0, 0.6), radius = 21.0,
         )
-        for (i in 0 until res2.vertexCount) {
-            assertTrue(res2.positions[i * 3].isFinite())
-            assertTrue(res2.positions[i * 3 + 1].isFinite())
+        val resCenter = CurlMesh.build(
+            pageW = 420.0, pageH = 560.0, originX = 0.0,
+            cols = 40, rows = 24,
+            axisPoint = Vec2(210.0, 0.0), axisNormal = Vec2(1.0, 0.6), radius = 21.0,
+        )
+        assertEquals(resCenter.vertexCount, resNaN.vertexCount, "fallback must reproduce the center build")
+        for (i in 0 until resNaN.vertexCount * 3) {
+            assertEquals(
+                resCenter.positions[i].toDouble(),
+                resNaN.positions[i].toDouble(),
+                1e-4,
+                "vertex $i must match the center build",
+            )
+        }
+    }
+
+    @Test
+    fun `huge finite axis normal is normalized with hypot and keeps its direction`() {
+        // x*x + y*y overflows to Infinity for inputs around 2e154, which used to
+        // discard the normal and fall back to (1, 0). hypot-based scaling must
+        // keep the true diagonal direction, producing the exact same mesh as an
+        // explicit (1/sqrt(2), 1/sqrt(2)) normal.
+        val huge = 2.0e154
+        val (_, resHuge) = build {
+            axisNormal = Vec2(huge, huge)
+            radius = 0.0
+        }
+        for (i in 0 until resHuge.vertexCount) {
+            assertTrue(resHuge.positions[i * 3].isFinite())
+            assertTrue(resHuge.positions[i * 3 + 1].isFinite())
+        }
+        val inv = 1.0 / kotlin.math.sqrt(2.0)
+        val (_, resExact) = build {
+            axisNormal = Vec2(inv, inv)
+            radius = 0.0
+        }
+        assertEquals(resExact.vertexCount, resHuge.vertexCount, "direction must survive the huge normal")
+        for (i in 0 until resHuge.vertexCount * 3) {
+            assertEquals(
+                resExact.positions[i].toDouble(),
+                resHuge.positions[i].toDouble(),
+                1e-4,
+                "vertex $i diverges from the exact-normal build",
+            )
+        }
+        for (i in 0 until resHuge.vertexCount * 2) {
+            assertEquals(
+                resExact.uvs[i].toDouble(),
+                resHuge.uvs[i].toDouble(),
+                1e-4,
+                "uv $i diverges from the exact-normal build",
+            )
         }
     }
 }

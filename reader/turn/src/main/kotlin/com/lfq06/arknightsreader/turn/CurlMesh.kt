@@ -74,6 +74,12 @@ object CurlMesh {
      * supplied, its arrays are reused in place; otherwise fresh arrays are
      * allocated. Non-finite inputs degrade safely: a degenerate normal falls
      * back to (1, 0) and non-finite geometry never emits non-finite vertices.
+     *
+     * Axis-point fallback: any non-finite component of [axisPoint] is replaced
+     * per-component (x by `originX + pageW / 2`, y by 0), which is the page
+     * center in mesh coordinates. A fully NaN axis therefore behaves exactly
+     * like an axis through the page center -- distances become ordinary signed
+     * distances from the center and the build stays seam-aligned.
      */
     fun build(
         pageW: Double,
@@ -295,10 +301,16 @@ object CurlMesh {
     private fun signedDistance(px: Double, py: Double, axis: Vec2, n: Vec2): Double =
         (px - axis.x) * n.x + (py - axis.y) * n.y
 
+    /**
+     * Unit-normalizes [n] with hypot semantics: the length is computed without
+     * squaring the components, so components up to Double.MAX_VALUE keep their
+     * true direction instead of overflowing `x*x + y*y` to Infinity around
+     * 2e154 and discarding the normal into the (1, 0) fallback. A zero or
+     * non-finite input still falls back to (1, 0).
+     */
     private fun normalize2(n: Vec2): Vec2 {
-        val squared = n.x * n.x + n.y * n.y
-        val norm = if (squared.isFinite() && squared > EPS) kotlin.math.sqrt(squared) else 0.0
-        return if (norm > EPS) Vec2(n.x / norm, n.y / norm) else Vec2(1.0, 0.0)
+        val norm = kotlin.math.hypot(n.x, n.y)
+        return if (norm.isFinite() && norm > EPS) Vec2(n.x / norm, n.y / norm) else Vec2(1.0, 0.0)
     }
 
     private fun Double.finiteNumber(fallback: Double): Double =
