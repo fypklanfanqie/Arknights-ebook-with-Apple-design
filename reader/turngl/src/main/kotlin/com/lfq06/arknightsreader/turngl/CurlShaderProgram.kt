@@ -43,9 +43,8 @@ precision highp float;
 uniform vec2 uAxisPoint;
 uniform vec2 uAxisNormal;
 uniform float uRadius;
-uniform float uPageW;
-uniform float uPageH;
 uniform float uOffset;
+uniform mat4 uMvp;
 
 attribute vec3 position;
 attribute vec2 uv;

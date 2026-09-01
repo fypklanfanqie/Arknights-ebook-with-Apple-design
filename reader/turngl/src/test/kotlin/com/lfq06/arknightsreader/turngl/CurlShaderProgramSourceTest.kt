@@ -18,10 +18,15 @@ class CurlShaderProgramSourceTest {
     @Test
     fun `vertex shader declares the documented uniforms`() {
         for (name in listOf(
-            "uAxisPoint", "uAxisNormal", "uRadius", "uPageW", "uPageH", "uOffset",
+            "uAxisPoint", "uAxisNormal", "uRadius", "uOffset",
         )) {
             assertTrue(Regex("uniform\\s+\\w+\\s+$name\\b").containsMatchIn(vert), "missing uniform $name")
         }
+        // Minor cleanup: uPageW/uPageH were declared but never read by the
+        // shader body; they must stay removed (dead uniforms) unless a use
+        // (e.g. crease normalization) is reintroduced alongside.
+        assertTrue(!vert.contains("uPageW"), "uPageW is unused and must not be declared")
+        assertTrue(!vert.contains("uPageH"), "uPageH is unused and must not be declared")
     }
 
     @Test
@@ -77,6 +82,20 @@ class CurlShaderProgramSourceTest {
     @Test
     fun `shaders declare es precision`() {
         assertTrue(frag.contains("precision highp float"), "fragment precision missing")
+    }
+
+    @Test
+    fun `vertex shader declares uMvp before its use in gl_Position`() {
+        // RED for C-1: the vertex shader multiplies gl_Position by uMvp but
+        // never declares it, so GLSL compilation must fail on device.
+        val mvpDecl = Regex("uniform\\s+mat4\\s+uMvp\\s*;")
+        assertTrue(mvpDecl.containsMatchIn(vert), "vertex shader must declare uniform mat4 uMvp;")
+        // The declaration must precede the first use (gl_Position assignment),
+        // otherwise the declaration is useless.
+        val declStart = mvpDecl.find(vert)?.range?.first ?: -1
+        val use = vert.indexOf("uMvp *")
+        assertTrue(use >= 0, "gl_Position must be computed via uMvp")
+        assertTrue(declStart in 0 until use, "uMvp declaration must come before its use (decl=$declStart, use=$use)")
     }
 
     @Test
