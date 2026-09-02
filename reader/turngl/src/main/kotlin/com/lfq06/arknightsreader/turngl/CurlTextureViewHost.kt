@@ -219,43 +219,49 @@ class CurlTextureViewHost(
         eglDisplay = display
         eglContext = context
         eglSurface = winSurface
-        synchronized(rebuildLock) {
-            renderer.initialize()
-            buffers.ensureCapacity(CurlEglFrame.DEFAULT_COLS, CurlEglFrame.DEFAULT_ROWS)
-        }
-        if (!renderer.isReady) {
-            releaseEgl()
-            running = false
-            return
-        }
-        CurlEglFrame.setup(renderer, buffers)
-        onEglReady?.invoke()
-        GLES20.glClearColor(0f, 0f, 0f, 0f)
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        GLES20.glEnable(GLES20.GL_CULL_FACE)
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        // The GL resources, cached frame handles and EGL display must be
+        // released on EVERY exit path — including a RuntimeException escaping
+        // tick() (F4). Skipping teardown here would leave program != 0 cached
+        // and the next lifecycle's setup() would draw with dead handles.
+        try {
+            synchronized(rebuildLock) {
+                renderer.initialize()
+                buffers.ensureCapacity(CurlEglFrame.DEFAULT_COLS, CurlEglFrame.DEFAULT_ROWS)
+            }
+            if (!renderer.isReady) {
+                running = false
+                return
+            }
+            CurlEglFrame.setup(renderer, buffers)
+            onEglReady?.invoke()
+            GLES20.glClearColor(0f, 0f, 0f, 0f)
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glEnable(GLES20.GL_CULL_FACE)
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST)
 
-        while (running) {
-            val drew = tick()
-            if (!drew) {
-                try {
-                    Thread.sleep(IDLE_SLEEP_MS)
-                } catch (_: InterruptedException) {
-                    break
+            while (running) {
+                val drew = tick()
+                if (!drew) {
+                    try {
+                        Thread.sleep(IDLE_SLEEP_MS)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
                 }
             }
+        } finally {
+            synchronized(rebuildLock) {
+                buffers.release()
+                renderer.release()
+            }
+            // I-6 end-to-end: drop the cached program/uniform/texture handles
+            // that belong to THIS EGL context. Without this, a second
+            // lifecycle's setup() early-returns on program != 0 and draws
+            // with dead handles from the destroyed context.
+            CurlEglFrame.teardown()
+            releaseEgl()
         }
-        synchronized(rebuildLock) {
-            buffers.release()
-            renderer.release()
-        }
-        // I-6 end-to-end: drop the cached program/uniform/texture handles that
-        // belong to THIS EGL context. Without this, a second lifecycle's
-        // setup() early-returns on program != 0 and draws with dead handles
-        // from the destroyed context.
-        CurlEglFrame.teardown()
-        releaseEgl()
     }
 
     /**

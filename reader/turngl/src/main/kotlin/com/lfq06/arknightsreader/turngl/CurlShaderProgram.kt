@@ -7,8 +7,12 @@ package com.lfq06.arknightsreader.turngl
  * - Vertex `position.xy` holds material-space coordinates produced by
  *   CurlMesh.build: x in [originX, originX + pageW], y in [-pageH/2, +pageH/2]
  *   with +y = canonical page TOP (CurlMesh negates the canonical y when
- *   building material coords; uv v = 1 is the page top, which matches
- *   GLUtils.texImage2D putting the bitmap's top row at v = 1).
+ *   building material coords; uv v = 1 is the page top).
+ * - TEXTURE ORIENTATION: GLUtils.texImage2D streams the Bitmap's top row
+ *   first; GL ES places the first data element at texture v = 0, so
+ *   uv v = 0 samples the bitmap's TOP row. CurlMesh assigns v = 1 to the
+ *   page TOP, so the fragment shader flips v (`1.0 - vUv.y`) on both faces:
+ *   the page top samples the bitmap's top row and content renders upright.
  * - `uAxisPoint` / `uAxisNormal` are the crease axis already converted into
  *   the same material space (see CurlMesh.canonicalToMeshPoint /
  *   canonicalToMeshVector).
@@ -125,11 +129,16 @@ void main() {
     vec3 N = normalize(vNrm);
     vec4 tex;
     if (uIsBack > 0.5) {
-        // Back sheet mirrors horizontally (viewing the verso of the page).
-        tex = texture2D(uBack, vec2(1.0 - vUv.x, vUv.y));
+        // Back sheet mirrors horizontally (viewing the verso of the page) and
+        // vertically (v-flip below); together they give the correct verso.
+        tex = texture2D(uBack, vec2(1.0 - vUv.x, 1.0 - vUv.y));
         N = -N;
     } else {
-        tex = texture2D(uFront, vUv);
+        // GLUtils.texImage2D streams the Bitmap's TOP row first, and GL ES
+        // places the first data element at v = 0, so uv v = 0 samples the
+        // bitmap's top row. CurlMesh assigns v = 1 to the page TOP, so the
+        // v-flip here keeps the on-page content upright.
+        tex = texture2D(uFront, vec2(vUv.x, 1.0 - vUv.y));
     }
     float diff = max(0.0, dot(N, normalize(uLight)));
     // Fold shadow: deepest at the crease, modulated per material.

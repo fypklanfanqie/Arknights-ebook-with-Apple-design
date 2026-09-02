@@ -103,11 +103,12 @@ object CurlProjection {
 
         // No y-flip: mesh +y IS the canonical page top (CurlMesh negates the
         // canonical y when building material coords), so mesh +y must map to
-        // viewport top (+NDC y). A flip here rendered the page upside-down
-        // (bitmap bottom row at the viewport top) because GLUtils.texImage2D
-        // puts the bitmap's top row at uv v = 1, which CurlMesh assigns to the
-        // page top. This also restores the standard glFrustum handedness
-        // (det(MVP) < 0) the two-pass cull scheme was designed against.
+        // viewport top (+NDC y). Content uprightness comes from the fragment
+        // shader's v-flip (GLUtils.texImage2D streams the bitmap top row
+        // first, landing at texture v = 0). This also keeps the standard
+        // glFrustum handedness (det(MVP) < 0) the two-pass cull scheme was
+        // designed against; a y-flip here would invert it AND mirror the
+        // winding, breaking the front/back material assignment.
 
         // out = P * V.
         mul(out, p, v)

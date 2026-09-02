@@ -68,7 +68,8 @@ fallback; any new producer of frame params must do the same.
 `CurlShaderMath.deform` is a JVM mirror of this mapping;
 `CurlShaderMathTest` fails if it drifts from `CurlSolver.deformPoint`, and
 `CurlShaderProgramSourceTest` locks the GLSL source contract (uniforms,
-branches, back-face UV mirror `vec2(1-uv.x, uv.y)`, half-thickness offset).
+branches, back-face UV mirror `vec2(1-uv.x, 1-uv.y)`, front v-flip
+`vec2(vUv.x, 1-vUv.y)`, half-thickness offset).
 
 Back/face materials: two draw calls over the same VBO. Front samples `uFront`
 at `vUv`; back samples `uBack` at mirrored UV. The two sheets are separated
@@ -114,14 +115,20 @@ never mid-drag; the lab has no database at all).
 
 ## Projection contract
 
-- No y-flip: mesh +y IS the canonical page top (CurlMesh negates the
-  canonical y), so mesh +y (uv v=1) maps to viewport top — upright content,
-  matching `GLUtils.texImage2D` (bitmap top row at v=1). A previous y-flip
-  rendered the page upside-down.
+- No y-flip in the MVP: mesh +y IS the canonical page top (CurlMesh negates
+  the canonical y), so mesh +y (uv v=1) maps to viewport top.
+- TEXTURE orientation: `GLUtils.texImage2D` streams the Bitmap's top row
+  first, and GL ES places the first data element at texture v = 0 — so
+  uv v = 0 samples the bitmap's TOP row (AOSP `util_texImage2D` passes
+  `bitmap.getPixels()` straight through with no row flip). The fragment
+  shader therefore flips v (`1.0 - vUv.y`) on BOTH faces: the page top
+  (v = 1) samples v = 0 = the bitmap's top row, rendering content upright.
+  The back face also mirrors u for the verso.
 - `det(MVP)` follows the standard glFrustum convention (negative); the
   two-pass cull scheme (front: cull BACK, back: cull FRONT) is consistent
-  with it. Front/back material correctness on real drivers is gated by the
-  on-device checklist below.
+  with it. A y-flip in the MVP would invert the handedness AND mirror the
+  winding, breaking the front/back material assignment. Front/back material
+  correctness on real drivers is gated by the on-device checklist below.
 
 ## Known limitations
 
@@ -142,13 +149,14 @@ After the review-fix round the following still needs a real device:
   source contract but cannot run the GLSL compiler).
 - Curl visible and unclipped at max radius (C-4 projection coverage).
 - Checkerboard on both faces with correct mirroring and UPRIGHT content
-  (no-flip projection: page top shows the bitmap top row); crease shading.
+  (shader v-flip: page top shows the bitmap's top row); crease shading.
 - Front/back material assignment matches the geometric face (two-pass cull
   under the standard glFrustum handedness) — FRONT 1 on the visible face.
 - Settle animation renders from the returned params (C-3), runs the full
   300 ms (not one frame), and stops rendering after completion (quiescent).
-- destroy -> re-available cycle keeps rendering (I-6: teardown now drops the
-  cached program handles on loop exit).
+- destroy -> re-available cycle keeps rendering (I-6: the loop's finally
+  block releases GL resources and drops cached handles on every exit path,
+  including a render-loop exception).
 - No texture upload from the UI thread (I-1): texture appears after EGL init,
   no GL warnings.
 

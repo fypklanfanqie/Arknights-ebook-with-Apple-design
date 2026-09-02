@@ -66,8 +66,13 @@ class CurlShaderProgramSourceTest {
     fun `fragment shader samples both textures with mirrored back uv`() {
         assertTrue(Regex("uniform\\s+sampler2D\\s+uFront\\b").containsMatchIn(frag))
         assertTrue(Regex("uniform\\s+sampler2D\\s+uBack\\b").containsMatchIn(frag))
-        // Back face mirrors u horizontally.
-        assertTrue(frag.contains("1.0 - vUv.x"), "back-face UV mirror missing")
+        // Both faces flip v (GLUtils streams the bitmap top row first, landing
+        // at v = 0; CurlMesh assigns v = 1 to the page top — the flip keeps
+        // content upright). The back face additionally mirrors u (verso).
+        assertTrue(Regex("texture2D\\(uFront,\\s*vec2\\(vUv\\.x,\\s*1\\.0\\s*-\\s*vUv\\.y\\)\\)").containsMatchIn(frag),
+            "front sampling must flip v for upright content")
+        assertTrue(Regex("texture2D\\(uBack,\\s*vec2\\(1\\.0\\s*-\\s*vUv\\.x,\\s*1\\.0\\s*-\\s*vUv\\.y\\)\\)").containsMatchIn(frag),
+            "back sampling must mirror u (verso) and flip v (same orientation rule)")
         // uIsBack selects the material.
         assertTrue(Regex("uniform\\s+float\\s+uIsBack\\b").containsMatchIn(frag))
     }

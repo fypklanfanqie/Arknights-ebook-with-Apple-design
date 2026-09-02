@@ -280,8 +280,12 @@ class CurlLabActivity : Activity() {
                     if (outcome != null) {
                         startSettle(outcome)
                     } else {
-                        // Never left PRESSING: snap back to flat.
+                        // Degenerate UP (pointer mismatch, double UP, phase
+                        // already settled): no settle will run, so clear the
+                        // drag's dirty flag here — otherwise the render thread
+                        // spins on a static page until the next interaction.
                         pipeline.clearOutcome()
+                        textureView.setDirty(false)
                         textureView.requestFrame()
                     }
                 }
@@ -299,6 +303,12 @@ class CurlLabActivity : Activity() {
 
     /** Kicks the 300 ms ease settle toward the commit/cancel end state. */
     private fun startSettle(outcome: TurnOutcome) {
+        // Publish the start time BEFORE the endpoints: the render thread can
+        // observe the endpoints the instant they become non-null (the drag
+        // keeps dirty mode spinning), so a late startMs would make the first
+        // settle frame compute t >= 1 and skip the whole animation. Any reader
+        // that sees non-null endpoints now necessarily sees the correct start.
+        settleStartMs = System.currentTimeMillis()
         // From the last solved curl (if any); otherwise start flat.
         val from = pipeline.lastCurl?.let { pipeline.paramsFor(it) } ?: idleParams()
         val to = when (outcome) {
@@ -314,10 +324,9 @@ class CurlLabActivity : Activity() {
 
             TurnOutcome.Cancel -> idleParams()
         }
+        settleIsCommit = outcome == TurnOutcome.Commit
         settleFrom = from
         settleTo = to
-        settleIsCommit = outcome == TurnOutcome.Commit
-        settleStartMs = System.currentTimeMillis()
         textureView.setDirty(true)
     }
 
