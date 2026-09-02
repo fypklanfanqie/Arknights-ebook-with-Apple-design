@@ -110,6 +110,8 @@ class CurlMeshBuffersProxyTest {
         buffers.ensureCapacity(4, 4)
         buffers.ensureCapacity(24, 16)
         assertEquals(2, gl.calls.count { it == "genBuffers" }, "growth must re-gen a larger buffer")
+        // The old VBO must not leak on growth.
+        assertTrue(gl.calls.any { it.startsWith("deleteBuffers:[7]") }, "growth must delete the old GL buffer")
         // Worst-case budget of the larger grid must fit.
         val budget = CurlMeshBuffers.vertexCapacityFor(24, 16)
         val big = meshResult(budget)

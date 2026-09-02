@@ -131,4 +131,23 @@ class CurlLabPipelineTest {
             assertTrue(p.lastMesh!!.positions === firstArray, "mesh output must be reused on the drag path")
         }
     }
+
+    @Test
+    fun `ui-thread move never builds the mesh (I-4 single writer)`() {
+        // The thread contract: move() feeds progress but must NOT build the
+        // mesh or touch the shared output; only frameFor() (render thread)
+        // produces lastMesh. Assert the mesh is null after pure UI-side moves.
+        val p = pipeline()
+        p.press(1, 420.0, 280.0, 0.0)
+        p.move(1, 350.0, 270.0, 16.0)
+        p.arm(17.0)
+        p.move(1, 250.0, 260.0, 32.0)
+        assertNull(p.lastMesh, "UI-thread move() must not build the mesh (I-4)")
+        // The solve-only path still caches progress for diagnostics.
+        val curl = assertNotNull(p.lastCurl)
+        assertTrue(curl.progress > 0.0, "solve-only must still track live progress")
+        // The render-thread build path produces the mesh.
+        p.frameFor()
+        assertTrue(p.lastMesh!!.vertexCount > 0, "frameFor (render thread) builds the mesh")
+    }
 }

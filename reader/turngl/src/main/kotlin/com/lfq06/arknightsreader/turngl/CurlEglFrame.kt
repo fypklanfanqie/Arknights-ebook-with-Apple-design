@@ -189,7 +189,8 @@ object CurlEglFrame {
 
     /**
      * Builds the MVP via [CurlProjection] (pure Kotlin, JVM-testable): C-4
-     * frustum covering the curl height and y-flip for the mesh-space down axis.
+     * frustum covering the curl height; mesh +y (canonical page top) maps to
+     * viewport top, so content stays upright (no y-flip).
      */
     private fun buildMvp(params: CurlFrameParams, vpW: Int, vpH: Int) {
         CurlProjection.mvp(params, vpW, vpH, mvp)

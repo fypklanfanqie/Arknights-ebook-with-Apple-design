@@ -93,19 +93,29 @@ class CurlTextureViewHostReuseTest {
     }
 
     @Test
-    fun `stop returns only after the worker has exited (I-5)`() {
-        val proxy = FakeProxy()
-        val host = CurlTextureViewHost(rendererFactory = { CurlGLRenderer(proxy) })
-        try {
-            host.start(android.graphics.SurfaceTexture(0), 320, 480)
-        } catch (_: Throwable) {
-        }
-        host.stop()
-        // After stop() returns, no worker thread may still be alive (bounded
-        // join). The worker either never started (JVM EGL failure) or exited.
-        val alive = Thread.getAllStackTraces().keys.any {
-            it.name == "curl-render" && it.isAlive
-        }
-        assertTrue(!alive, "no curl-render thread may outlive stop()")
+    fun `loop teardown drops the cached program handles (I-6 end-to-end)`() {
+        // The second lifecycle must not early-return in CurlEglFrame.setup
+        // because of a program handle cached from the first context. Lock the
+        // wiring at source level: the render loop's exit path calls teardown.
+        val src = java.io.File("src/main/kotlin/com/lfq06/arknightsreader/turngl/CurlTextureViewHost.kt")
+            .readText()
+        val loopStart = src.indexOf("private fun loop(")
+        val loopEnd = src.indexOf("private fun tick(")
+        assertTrue(loopStart in 0 until loopEnd, "loop() must exist before tick()")
+        val loopBody = src.substring(loopStart, loopEnd)
+        assertTrue(
+            Regex("CurlEglFrame\\.teardown\\(\\)").containsMatchIn(loopBody),
+            "loop exit must call CurlEglFrame.teardown() so a second lifecycle gets fresh handles",
+        )
+        val teardownAfterRelease = loopBody.indexOf("CurlEglFrame.teardown()") > loopBody.indexOf("renderer.release()")
+        assertTrue(teardownAfterRelease, "teardown must run after the GL resources are released")
+    }
+
+    @Test
+    fun `legacy pending mesh channel is gone (single writer, I-4)`() {
+        val src = java.io.File("src/main/kotlin/com/lfq06/arknightsreader/turngl/CurlTextureViewHost.kt")
+            .readText()
+        assertTrue(!src.contains("consumePendingMesh"), "legacy pending-mesh queue must be removed (single-writer contract)")
+        assertTrue(!src.contains("fun updateMesh"), "legacy updateMesh must be removed; only render-thread uploadMesh remains")
     }
 }

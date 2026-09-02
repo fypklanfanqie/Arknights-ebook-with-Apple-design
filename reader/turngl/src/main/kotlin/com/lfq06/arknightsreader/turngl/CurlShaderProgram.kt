@@ -6,7 +6,9 @@ package com.lfq06.arknightsreader.turngl
  * COORDINATE CONTRACT (must match CurlMesh / CurlSolver):
  * - Vertex `position.xy` holds material-space coordinates produced by
  *   CurlMesh.build: x in [originX, originX + pageW], y in [-pageH/2, +pageH/2]
- *   with +y = page BOTTOM in mesh space (canonical top was negated).
+ *   with +y = canonical page TOP (CurlMesh negates the canonical y when
+ *   building material coords; uv v = 1 is the page top, which matches
+ *   GLUtils.texImage2D putting the bitmap's top row at v = 1).
  * - `uAxisPoint` / `uAxisNormal` are the crease axis already converted into
  *   the same material space (see CurlMesh.canonicalToMeshPoint /
  *   canonicalToMeshVector).

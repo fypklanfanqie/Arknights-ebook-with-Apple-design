@@ -63,6 +63,9 @@ class CurlLabActivity : Activity() {
     @Volatile
     private var settleIsCommit = false
 
+    // Volatile so the render thread cannot observe a stale start time and jump
+    // the settle animation to t=1 on its first frame.
+    @Volatile
     private var settleStartMs = 0L
 
     private var frontBitmap: Bitmap? = null
@@ -204,7 +207,8 @@ class CurlLabActivity : Activity() {
         val to = settleTo
         val from = settleFrom
         if (to != null && from != null) {
-            val t = ((System.currentTimeMillis() - settleStartMs) / SETTLE_MS).coerceIn(0.0, 1.0)
+            val startMs = settleStartMs
+            val t = ((System.currentTimeMillis() - startMs) / SETTLE_MS).coerceIn(0.0, 1.0)
             val e = easeInOut(t)
             val lerped = lerpParams(from, to, e)
             if (t >= 1.0) {
@@ -213,12 +217,15 @@ class CurlLabActivity : Activity() {
                 settleTo = null
                 settleIsCommit = false
                 pipeline.clearOutcome()
+                // The settle finished: stop the continuous dirty loop NOW, in
+                // the same code path that consumed it. Without this the render
+                // thread spins at full speed redrawing the idle frame forever.
+                textureView.setDirty(false)
                 if (wasCommit) {
                     // Reset the page to flat for the next turn (real page
                     // swap is the next task's job).
                     return idleParams()
                 }
-                runOnUiThread { textureView.setDirty(false) }
             }
             return lerped
         }
@@ -280,7 +287,10 @@ class CurlLabActivity : Activity() {
                 }
                 velocityTracker?.recycle()
                 velocityTracker = null
-                textureView.setDirty(false)
+                // NO setDirty(false) here: startSettle owns the dirty flag for
+                // the settle animation it just started. Clearing dirty on the
+                // release path froze the settle after one frame (the render
+                // thread consumed the dirty tick before the animation began).
                 textureView.requestFrame()
             }
         }

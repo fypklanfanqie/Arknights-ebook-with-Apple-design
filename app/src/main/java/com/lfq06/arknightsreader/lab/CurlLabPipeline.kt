@@ -21,8 +21,16 @@ import com.lfq06.arknightsreader.turngl.CurlFrameParams
  * classes touch this object, so the whole drag pipeline is JVM-testable.
  *
  * Pipeline per move: clientToCanonical -> resolveDragDirection (press only) ->
- * reduce(Press/Move) -> constrained target -> CurlSolver.solve ->
+ * reduce(Press/Move) -> solve-only progress feed (no mesh build on the UI
+ * thread) -> the render thread's frameFor() does CurlSolver.solve ->
  * CurlMesh.build (into a reused output) -> CurlFrameParams for the renderer.
+ *
+ * Thread contract (I-4): the UI thread routes touch events into the reducer
+ * and feeds solve-only progress; ONLY the render thread (via [frameFor])
+ * builds the mesh into the shared output arrays, so the VBO upload path has a
+ * single writer. `gesture` reads from the render thread see stale-but-valid
+ * immutable snapshots (data class); progress precision at release is
+ * acceptable because the UI thread fed Progress continuously during the drag.
  *
  * Drag-path invariants (mirrors the reader-integration contract):
  * - no re-pagination (page dims fixed at reset),
@@ -138,11 +146,12 @@ class CurlLabPipeline(
             mode = com.lfq06.arknightsreader.turn.PageMode.SINGLE,
         )
         gesture = TurnGesture.reduce(gesture, TurnGestureAction.Move(pointerId, canonical, timeMs))
-        // Per-frame pipeline: constrained Q -> solve -> Progress into the
-        // reducer, so decideRelease sees live progress instead of relying on
-        // velocity alone.
+        // Feed live progress into the reducer so decideRelease sees more than
+        // velocity alone. THREAD CONTRACT (I-4): this solves WITHOUT building
+        // the mesh — only the render thread (frameFor) touches the shared
+        // MeshOutput arrays, so the UI thread can never race the VBO upload.
         if (gesture.phase.isActive) {
-            solveCurrent()?.let { state ->
+            solveOnly()?.let { state ->
                 gesture = TurnGesture.reduce(
                     gesture,
                     TurnGestureAction.Progress(state.progress, timeMs),
@@ -187,8 +196,11 @@ class CurlLabPipeline(
     }
 
     /**
-     * Builds the frame params for the current gesture target. Returns null
-     * when the page should draw flat (no active drag and no settle animation).
+     * Builds the frame params for the current gesture target. RENDER THREAD
+     * ONLY (I-4): this is the sole writer of the shared [MeshOutput] arrays
+     * and the sole caller of [CurlMesh.build]; the UI thread only feeds the
+     * reducer and reads diagnostics. Returns null when the page should draw
+     * flat (no active drag and no settle animation).
      */
     fun frameFor(): CurlFrameParams? {
         val curl = if (gesture.phase.isActive) {
@@ -202,17 +214,8 @@ class CurlLabPipeline(
     /** Solves the curl for the current gesture snapshot and caches the mesh. */
     fun solveCurrent(): CurlState? {
         if (!gesture.phase.isActive) return null
+        val state = solveOnly() ?: return null
         val dir = gesture.dir.takeIf { it != 0 } ?: 1
-        val grab = gesture.grab
-        val target = gesture.target
-        val state = CurlSolver.solve(
-            grab = grab,
-            target = target,
-            pageWidth = pageW,
-            pageHeight = pageH,
-            requestedRadius = pageW * radiusFraction,
-        )
-        lastCurl = state
         lastMesh = CurlMesh.build(
             pageW = pageW,
             pageH = pageH,
@@ -224,6 +227,26 @@ class CurlLabPipeline(
             radius = state.radius,
             output = output,
         )
+        return state
+    }
+
+    /**
+     * Solve WITHOUT building the mesh: safe on any thread (UI included).
+     * Caches [lastCurl] for diagnostics only; never touches the shared
+     * [MeshOutput] arrays.
+     */
+    private fun solveOnly(): CurlState? {
+        if (!gesture.phase.isActive) return null
+        val grab = gesture.grab
+        val target = gesture.target
+        val state = CurlSolver.solve(
+            grab = grab,
+            target = target,
+            pageWidth = pageW,
+            pageHeight = pageH,
+            requestedRadius = pageW * radiusFraction,
+        )
+        lastCurl = state
         return state
     }
 

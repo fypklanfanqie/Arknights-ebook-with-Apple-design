@@ -47,21 +47,24 @@ class CurlProjectionTest {
         // Page (420 wide) centered in a 1080-wide viewport: 1 page pixel =
         // 1 viewport pixel, so the page left edge sits at viewport pixel 330
         // -> NDC x = 2*330/1080 - 1 = -0.3889 (NOT -1: the page is smaller
-        // than the viewport). Mesh +y is page bottom -> clip +y after flip.
-        val tl = CurlProjection.apply(out, 0f, -280f, 0f)
-        val br = CurlProjection.apply(out, 420f, 280f, 0f)
+        // than the viewport). Mesh +y is the canonical page TOP (CurlMesh
+        // negates the canonical y), so mesh y=-280 is the page BOTTOM and must
+        // map to the viewport BOTTOM (-NDC y) — no y-flip anywhere.
+        val pageTop = CurlProjection.apply(out, 0f, 280f, 0f)
+        val pageBottom = CurlProjection.apply(out, 0f, -280f, 0f)
+        val pageTopRight = CurlProjection.apply(out, 420f, 280f, 0f)
         val expectedX = 2f * 330f / 1080f - 1f
-        // Page top at viewport pixel 680; after the y-flip, GL ndc y = 1 at
-        // the viewport top, so ndc = 1 - 2*680/1920 = +0.2917.
+        // Page top at viewport pixel 680 -> ndc y = 1 - 2*680/1920 = +0.2917.
         val expectedTopY = 1f - 2f * 680f / 1920f
-        assertEquals(expectedX, tl[0] / tl[3], 1e-3f, "page left edge -> pixel-exact NDC x")
-        assertEquals(expectedTopY, tl[1] / tl[3], 1e-3f, "mesh top (y=-280) -> page top, y-flipped")
-        val expectedBottomY = -expectedTopY
-        assertEquals(-expectedX, br[0] / br[3], 1e-3f, "page right edge mirrors")
-        assertEquals(expectedBottomY, br[1] / br[3], 1e-3f, "mesh bottom mirrors")
+        assertEquals(expectedX, pageTop[0] / pageTop[3], 1e-3f, "page left edge -> pixel-exact NDC x")
+        assertEquals(expectedTopY, pageTop[1] / pageTop[3], 1e-3f, "mesh +y (page TOP, uv v=1) -> viewport TOP (upright content)")
+        assertEquals(-expectedX, pageTopRight[0] / pageTopRight[3], 1e-3f, "page right edge mirrors to +x")
+        assertEquals(expectedTopY, pageTopRight[1] / pageTopRight[3], 1e-3f, "right edge shares the top row")
+        assertEquals(expectedX, pageBottom[0] / pageBottom[3], 1e-3f, "bottom-left vertex shares the left edge x")
+        assertEquals(-expectedTopY, pageBottom[1] / pageBottom[3], 1e-3f, "mesh -y (page BOTTOM, uv v=0) -> viewport BOTTOM")
         // 1:1 pixel scale: full NDC span of the page = pageW / halfVp.
-        assertEquals(420f / 540f, br[0] / br[3] - tl[0] / tl[3], 1e-3f, "page width maps 1:1")
-        assertEquals(560f / 960f, kotlin.math.abs(br[1] / br[3] - tl[1] / tl[3]), 1e-3f, "page height maps 1:1")
+        assertEquals(2f * -expectedX, pageTopRight[0] / pageTopRight[3] - pageTop[0] / pageTop[3], 1e-3f, "page width maps 1:1")
+        assertEquals(2f * expectedTopY, pageTop[1] / pageTop[3] - pageBottom[1] / pageBottom[3], 1e-3f, "page height maps 1:1")
     }
 
     @Test
@@ -71,13 +74,13 @@ class CurlProjectionTest {
         // near=2/far=4 camera.
         val out = FloatArray(16)
         CurlProjection.mvp(params(radius = 21.0), vpW = 1080, vpH = 1920, out = out)
-        val top = CurlProjection.apply(out, 0f, 0f, 42f)
-        val ndcZ = top[2] / top[3]
+        val curlTop = CurlProjection.apply(out, 0f, 0f, 42f)
+        val ndcZ = curlTop[2] / curlTop[3]
         assertTrue(ndcZ > -1f && ndcZ < 1f, "curl top z=42 must be inside the depth range (ndcZ=$ndcZ)")
         // Flat page corners stay pixel-exact in the same frame.
-        val tl = CurlProjection.apply(out, 0f, -280f, 0f)
+        val pageTop = CurlProjection.apply(out, 0f, 280f, 0f)
         val expectedX = 2f * 330f / 1080f - 1f
-        assertEquals(expectedX, tl[0] / tl[3], 1e-3f, "page geometry unchanged by the curl")
+        assertEquals(expectedX, pageTop[0] / pageTop[3], 1e-3f, "page geometry unchanged by the curl")
     }
 
     @Test

@@ -39,6 +39,7 @@ class CurlMeshBuffers(private val gl: GlesProxy = RealGles) {
     fun ensureCapacity(cols: Int, rows: Int) {
         val wanted = vertexCapacityFor(cols, rows)
         if (bufferId != 0 && wanted <= capacityVertices) return
+        val oldId = bufferId
         capacityVertices = maxOf(wanted, MIN_CAPACITY_VERTICES)
         // C-2: actually allocate a GL buffer here. The previous code assigned
         // bufferId from an array it never filled with glGenBuffers, so the id
@@ -54,6 +55,8 @@ class CurlMeshBuffers(private val gl: GlesProxy = RealGles) {
             GlesConsts.DYNAMIC_DRAW,
         )
         gl.glBindBuffer(GlesConsts.ARRAY_BUFFER, 0)
+        // Capacity growth re-gens a bigger VBO; the old one must not leak.
+        if (oldId != 0) gl.glDeleteBuffers(intArrayOf(oldId))
         staged = ByteBuffer
             .allocateDirect(capacityVertices * BYTES_PER_VERTEX)
             .order(ByteOrder.nativeOrder())

@@ -86,19 +86,42 @@ never mid-drag; the lab has no database at all).
 - Mesh: `CurlMesh.allocOutput` reused across frames; VBO updated with
   `glBufferSubData`; no per-drag allocation of GPU memory.
 - Idle: `CurlTextureHost` coalesces requests; with no pending request and no
-  dirty flag the render thread sleeps (24 ms poll), drawing nothing.
+  dirty flag the render thread sleeps (24 ms poll), drawing nothing. The
+  dirty mode is started by drag begin / settle start and cleared by the
+  render thread when the settle completes (t >= 1), so a committed page
+  returns to quiescent.
 - `release()` paths are idempotent (`CurlGLRenderer.release`,
   `CurlTextureHost.stop`, `CurlTextureViewHost.stop`).
 
 ## Threading contract
 
-- UI thread: touch events -> `TurnGesture` reducer; pushes nothing into GL.
+- UI thread: touch events -> `TurnGesture` reducer; feeds **solve-only**
+  progress (no mesh build). It never touches `MeshOutput` arrays or GL state.
 - Render thread ("curl-render"): owns EGL + all GLES calls; runs solve ->
-  `CurlMesh.build` (shared `MeshOutput`) -> VBO upload -> draw, and draws the
-  params returned by the frame listener THIS tick.
+  `CurlMesh.build` (the SOLE writer of the shared `MeshOutput` arrays) ->
+  VBO upload -> draw, and draws the params returned by the frame listener
+  THIS tick.
 - Shared state between them is limited to immutable snapshots: gesture state
   (`TurnGestureState` data class), `CurlFrameParams`, and settle endpoints
-  (volatile fields). The `MeshOutput` arrays are render-thread-private.
+  (volatile fields, including `settleStartMs`).
+- Settle lifecycle: the release path STARTS the dirty mode (`startSettle`);
+  the render thread STOPS it in `prepareFrame` when the animation reaches
+  t = 1 (same code path that consumed it). No `setDirty(false)` on the
+  release path — that froze the settle after one frame.
+- `CurlEglFrame.teardown()` runs on loop exit, so a second surface lifecycle
+  re-creates the program/uniform/texture handles instead of drawing with
+  dead ones from the destroyed EGL context.
+
+## Projection contract
+
+- No y-flip: mesh +y IS the canonical page top (CurlMesh negates the
+  canonical y), so mesh +y (uv v=1) maps to viewport top — upright content,
+  matching `GLUtils.texImage2D` (bitmap top row at v=1). A previous y-flip
+  rendered the page upside-down.
+- `det(MVP)` follows the standard glFrustum convention (negative); the
+  two-pass cull scheme (front: cull BACK, back: cull FRONT) is consistent
+  with it. Front/back material correctness on real drivers is gated by the
+  on-device checklist below.
 
 ## Known limitations
 
@@ -118,9 +141,14 @@ After the review-fix round the following still needs a real device:
 - Shader actually compiles/links on real GLES drivers (JVM tests lock the
   source contract but cannot run the GLSL compiler).
 - Curl visible and unclipped at max radius (C-4 projection coverage).
-- Checkerboard on both faces with correct mirroring; crease shading.
-- Settle animation renders from the returned params (C-3) — no one-frame lag.
-- destroy -> re-available cycle keeps rendering (I-6).
+- Checkerboard on both faces with correct mirroring and UPRIGHT content
+  (no-flip projection: page top shows the bitmap top row); crease shading.
+- Front/back material assignment matches the geometric face (two-pass cull
+  under the standard glFrustum handedness) — FRONT 1 on the visible face.
+- Settle animation renders from the returned params (C-3), runs the full
+  300 ms (not one frame), and stops rendering after completion (quiescent).
+- destroy -> re-available cycle keeps rendering (I-6: teardown now drops the
+  cached program handles on loop exit).
 - No texture upload from the UI thread (I-1): texture appears after EGL init,
   no GL warnings.
 

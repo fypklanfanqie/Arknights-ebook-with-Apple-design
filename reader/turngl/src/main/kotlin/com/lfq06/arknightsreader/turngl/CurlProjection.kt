@@ -61,7 +61,7 @@ object CurlProjection {
      * Builds the full MVP (column-major 4x4) mapping material space
      * (x in [0, pageW], y in [-pageH/2, +pageH/2], z up to 2r) to clip space
      * for a viewport of [vpW] x [vpH]. The page plane is centered on the
-     * viewport; +y (mesh bottom) maps to clip -y (GL bottom).
+     * viewport; mesh +y (canonical page TOP, uv v=1) maps to viewport top.
      */
     fun mvp(
         params: CurlFrameParams,
@@ -101,15 +101,16 @@ object CurlProjection {
         v[13] = 0f
         v[14] = -eyeZ
 
-        // Mesh y points down; flip y in clip space.
-        val flip = FloatArray(16)
-        java.util.Arrays.fill(flip, 0f)
-        flip[0] = 1f; flip[5] = -1f; flip[10] = 1f; flip[15] = 1f
+        // No y-flip: mesh +y IS the canonical page top (CurlMesh negates the
+        // canonical y when building material coords), so mesh +y must map to
+        // viewport top (+NDC y). A flip here rendered the page upside-down
+        // (bitmap bottom row at the viewport top) because GLUtils.texImage2D
+        // puts the bitmap's top row at uv v = 1, which CurlMesh assigns to the
+        // page top. This also restores the standard glFrustum handedness
+        // (det(MVP) < 0) the two-pass cull scheme was designed against.
 
-        // out = flip * P * V.
-        val pv = FloatArray(16)
-        mul(pv, p, v)
-        mul(out, flip, pv)
+        // out = P * V.
+        mul(out, p, v)
     }
 
     /** Column-major 4x4 multiply: out = a * b. out must not alias a or b. */

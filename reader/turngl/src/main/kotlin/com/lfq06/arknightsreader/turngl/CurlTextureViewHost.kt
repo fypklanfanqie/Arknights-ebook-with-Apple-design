@@ -22,9 +22,8 @@ import android.view.TextureView
  * - A single worker thread owns the EGL surface and ALL GLES calls. Mesh
  *   building ([com.lfq06.arknightsreader.turn.CurlMesh.build] into the shared
  *   [com.lfq06.arknightsreader.turn.CurlMesh.MeshOutput]) and VBO uploads
- *   happen exclusively on this thread, either via [uploadMesh] (called from
- *   the frame listener during prepare) or the legacy pending queue drained in
- *   [consumePendingMesh].
+ *   happen exclusively on this thread via [uploadMesh] (called from the
+ *   frame listener during prepare).
  * - [FrameListener.onPrepareFrame] runs on the render thread and RETURNS the
  *   params to draw this tick (C-3): the loop draws the returned snapshot, not
  *   a previously cached one, so settle-lerped or freshly solved params always
@@ -99,28 +98,6 @@ class CurlTextureViewHost(
      */
     fun uploadMesh(result: com.lfq06.arknightsreader.turn.CurlMesh.MeshResult) {
         buffers.setCurl(result)
-    }
-
-    /**
-     * Legacy UI-thread hand-off: stores the mesh; the render thread streams it
-     * into the VBO on its next tick. Kept for callers that build off-thread;
-     * the lab now builds on the render thread and uses [uploadMesh].
-     */
-    fun updateMesh(result: com.lfq06.arknightsreader.turn.CurlMesh.MeshResult) {
-        synchronized(meshLock) { pendingMesh = result }
-        frameHost.requestFrame()
-    }
-
-    private val meshLock = Any()
-    private var pendingMesh: com.lfq06.arknightsreader.turn.CurlMesh.MeshResult? = null
-
-    private fun consumePendingMesh() {
-        val mesh = synchronized(meshLock) {
-            val m = pendingMesh
-            pendingMesh = null
-            m
-        } ?: return
-        buffers.setCurl(mesh)
     }
 
     fun requestFrame() = frameHost.requestFrame()
@@ -273,6 +250,11 @@ class CurlTextureViewHost(
             buffers.release()
             renderer.release()
         }
+        // I-6 end-to-end: drop the cached program/uniform/texture handles that
+        // belong to THIS EGL context. Without this, a second lifecycle's
+        // setup() early-returns on program != 0 and draws with dead handles
+        // from the destroyed context.
+        CurlEglFrame.teardown()
         releaseEgl()
     }
 
@@ -282,7 +264,6 @@ class CurlTextureViewHost(
      * solved or settle-lerped), never a stale cached snapshot.
      */
     private fun tick(): Boolean {
-        consumePendingMesh()
         if (!frameHost.shouldRender(synchronized(lock) { frameParams })) return false
         frameHost.drainPending()
         val params = frameListener?.onPrepareFrame() ?: return false
