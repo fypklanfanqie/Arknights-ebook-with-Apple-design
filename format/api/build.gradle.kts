@@ -7,6 +7,7 @@ kotlin {
 }
 
 dependencies {
+    api(project(":data:model"))
     testImplementation(libs.junit.jupiter.api)
     testImplementation(libs.kotlin.test)
     testRuntimeOnly(libs.junit.jupiter.engine)
