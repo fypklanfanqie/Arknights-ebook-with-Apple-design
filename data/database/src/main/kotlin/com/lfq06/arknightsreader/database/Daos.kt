@@ -7,8 +7,25 @@ import androidx.room.Query
 
 @Dao
 interface BookDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /**
+     * First-insert only. REPLACE here would fire the FK CASCADE on re-upsert
+     * of an existing id and wipe the whole chapter/block tree, so re-inserts
+     * throw and metadata updates go through [updateProgress]/[updateMeta].
+     */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun upsert(book: BookEntity)
+
+    @Query(
+        "UPDATE books SET title = :title, author = :author, coverPath = :coverPath, " +
+            "formatVersion = :formatVersion WHERE id = :id",
+    )
+    suspend fun updateMeta(
+        id: String,
+        title: String,
+        author: String,
+        coverPath: String?,
+        formatVersion: Int,
+    )
 
     @Query("SELECT * FROM books WHERE id = :id")
     suspend fun queryById(id: String): BookEntity?
@@ -28,7 +45,12 @@ interface BookDao {
 
 @Dao
 interface ChapterDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /**
+     * Fresh insert for newly parsed books. REPLACE on an existing chapter id
+     * would fire the FK CASCADE and silently wipe its blocks; re-import must
+     * delete chapters first ([deleteByBook]) then insert.
+     */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertAll(chapters: List<ChapterEntity>)
 
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY orderIndex ASC")
@@ -43,8 +65,23 @@ interface ChapterDao {
 
 @Dao
 interface BlockDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /** Fresh insert for newly parsed chapters (ABORT surfaces id collisions loudly). */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertAll(blocks: List<ContentBlockEntity>)
+
+    /**
+     * Full rewrite of one chapter's blocks (re-import path). Delete-then-
+     * insert rather than REPLACE: REPLACE's implicit delete does NOT fire the
+     * FTS4 external-content sync triggers (recursive_triggers is off), which
+     * would leave stale rows in fts_blocks.
+     */
+    @Query("DELETE FROM content_blocks WHERE chapterId = :chapterId")
+    suspend fun deleteByChapter(chapterId: String)
+
+    suspend fun replaceByChapter(chapterId: String, blocks: List<ContentBlockEntity>) {
+        deleteByChapter(chapterId)
+        insertAll(blocks)
+    }
 
     @Query("SELECT * FROM content_blocks WHERE chapterId = :chapterId ORDER BY orderIndex ASC")
     suspend fun queryByChapterOrdered(chapterId: String): List<ContentBlockEntity>
@@ -129,15 +166,31 @@ data class BlockSearchHit(
 @Dao
 interface BookSearchDao {
     /**
-     * Full-text search over block text. The FTS4 default (simple) tokenizer
-     * cannot substring-match CJK, so the WHERE clause ORs MATCH (useful for
+     * Full-text search over block text. [matchQuery] must already be a safe
+     * FTS4 MATCH expression — build it with [FtsQueryBuilder.toMatchQuery],
+     * which quotes user input as a phrase so raw operators like OR/NEAR/`"`
+     * cannot break the statement. The WHERE clause ORs MATCH (useful for
      * space-delimited languages) with a LIKE substring fallback that also
      * covers CJK queries.
      */
     @Query(
         "SELECT cb.id AS blockId, cb.text AS snippet FROM content_blocks cb " +
-            "WHERE cb.id IN (SELECT rowid FROM fts_blocks WHERE fts_blocks.text MATCH :query) " +
-            "OR cb.text LIKE '%' || :query || '%' LIMIT :limit",
+            "WHERE cb.id IN (SELECT rowid FROM fts_blocks WHERE fts_blocks.text MATCH :matchQuery) " +
+            "OR cb.text LIKE '%' || :likeQuery || '%' LIMIT :limit",
     )
-    suspend fun search(query: String, limit: Int = 50): List<BlockSearchHit>
+    suspend fun search(matchQuery: String, likeQuery: String, limit: Int = 50): List<BlockSearchHit>
+}
+
+/** Builds FTS4-safe MATCH expressions from raw user input. */
+object FtsQueryBuilder {
+    /**
+     * Wraps [input] as a quoted FTS4 phrase. Embedded double quotes are
+     * doubled per FTS4 phrase syntax; empty input falls back to a phrase no
+     * real token contains, so the MATCH leg matches nothing but never throws.
+     */
+    fun toMatchQuery(input: String): String {
+        val sanitized = input.replace("\"", "\"\"").trim()
+        if (sanitized.isEmpty()) return "\"  \""
+        return "\"$sanitized\""
+    }
 }
