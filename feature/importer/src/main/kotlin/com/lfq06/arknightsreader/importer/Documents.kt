@@ -46,3 +46,20 @@ class FakeOpenDocuments : Documents {
 
     override fun displayName(uri: String): String? = files[uri]?.second
 }
+
+/**
+ * Reads from an in-memory registry keyed by pseudo-URIs. Serves both the
+ * Robolectric fakes and the asset-based preloader: callers register bytes
+ * under any scheme they control (e.g. `asset://builtin/x.txt`).
+ */
+class RegistryDocuments : Documents {
+    private val files = HashMap<String, Pair<ByteArray, String?>>()
+
+    fun register(uri: String, bytes: ByteArray, displayName: String? = null) {
+        files[uri] = bytes to displayName
+    }
+
+    override fun openBytes(uri: String): ByteArray? = files[uri]?.first
+
+    override fun displayName(uri: String): String? = files[uri]?.second
+}
