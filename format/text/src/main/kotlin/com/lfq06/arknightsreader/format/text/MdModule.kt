@@ -63,6 +63,9 @@ class MdModule : AbstractTextModule() {
             }
             if (line.isBlank()) continue
             if (THEMATIC_BREAK.matches(line)) {
+                // No SEPARATOR block kind yet: an empty PARAGRAPH renders as a
+                // rule; readers must treat empty-text PARAGRAPH blocks as
+                // thematic breaks and exclude them from FTS.
                 currentLines.add("")
                 currentKinds.add(BlockKind.PARAGRAPH)
                 currentImages.add(null)
@@ -91,11 +94,11 @@ class MdModule : AbstractTextModule() {
                 currentKinds.add(BlockKind.PARAGRAPH)
                 currentImages.add(null)
             }
-            if (blockCounter > FormatLimits.MAX_BLOCKS) {
-                throw com.lfq06.arknightsreader.format.api.ParseException("block count exceeds ${FormatLimits.MAX_BLOCKS}")
-            }
         }
         flush()
+        if (drafts.size > FormatLimits.MAX_CHAPTERS) {
+            throw com.lfq06.arknightsreader.format.api.ParseException("chapter count exceeds ${FormatLimits.MAX_CHAPTERS}")
+        }
 
         if (drafts.isEmpty()) {
             drafts.add(Draft(null, emptyList(), emptyList(), emptyList()))
@@ -115,6 +118,9 @@ class MdModule : AbstractTextModule() {
             )
         }
 
+        // Local per-parse state: a module instance must be reusable across
+        // parse() calls without leaking blocks from a previous run (I-1).
+        val blocksByChapter = HashMap<String, MutableList<ContentBlock>>()
         drafts.forEachIndexed { ci, draft ->
             val cid = chapterId(bookId, ci)
             var order = 0
@@ -129,6 +135,9 @@ class MdModule : AbstractTextModule() {
                 )
                 blocksByChapter.getOrPut(cid) { ArrayList() }.add(block)
             }
+            if (blockCounter > FormatLimits.MAX_BLOCKS) {
+                throw com.lfq06.arknightsreader.format.api.ParseException("block count exceeds ${FormatLimits.MAX_BLOCKS}")
+            }
         }
 
         return ParsedBook(
@@ -138,8 +147,6 @@ class MdModule : AbstractTextModule() {
             blocksByChapter = blocksByChapter,
         )
     }
-
-    private val blocksByChapter = HashMap<String, MutableList<ContentBlock>>()
 
     private fun matchAtxHeading(line: String): Pair<Int, String>? {
         val m = ATX_HEADING.matchEntire(line.trimEnd()) ?: return null

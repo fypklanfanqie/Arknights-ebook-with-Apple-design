@@ -17,22 +17,33 @@ import java.nio.charset.CodingErrorAction
  */
 abstract class AbstractTextModule : FormatModule {
 
-    /** Chunked, encoding-aware line reader over the import byte stream. */
+    /**
+     * Chunked, encoding-aware line reader over the import byte stream.
+     *
+     * UTF-16 sources are decoded whole-chunk with a char-level line split
+     * (byte scanning would cut 16-bit units in half); byte-oriented encodings
+     * use a single-byte LF/CR scan with cross-chunk carry assembly.
+     */
     protected class LineStream(readBlock: (Int) -> ByteArray?) {
         private val charset: Charset
+        private val utf16: Boolean
         private val chunks = ArrayDeque<ByteArray>()
         private var carry = ByteArray(0)
+        private var charCarry = StringBuilder()
         private var done = false
         private val reader: (Int) -> ByteArray?
+        private var firstLine = true
 
         init {
             // Peek the first chunk to sniff the encoding before decoding.
             val first = readBlock(FormatLimits.CHUNK_BYTES)
             if (first == null) {
                 charset = Charsets.UTF_8
+                utf16 = false
                 done = true
             } else {
                 charset = EncodingDetector.detect(first)
+                utf16 = charset == Charsets.UTF_16LE || charset == Charsets.UTF_16BE
                 chunks.addLast(first)
             }
             this.reader = readBlock
@@ -40,19 +51,71 @@ abstract class AbstractTextModule : FormatModule {
 
         val encodingName: String get() = charset.name()
 
-        fun nextLine(): String? {
+        fun nextLine(): String? = if (utf16) nextLineUtf16() else nextLineBytes()
+
+        // ---- UTF-16 path: decode whole chunks, split lines per char unit ----
+
+        // Pending odd byte carried between chunks so 16-bit units stay aligned.
+        private var pendingByte = ByteArray(0)
+
+        private fun nextLineUtf16(): String? {
+            while (true) {
+                val s = charCarry.toString()
+                val nl = s.indexOfAny(charArrayOf('\n', '\r'))
+                if (nl >= 0) {
+                    val line = s.substring(0, nl)
+                    var end = nl + 1
+                    // CRLF spans both chars.
+                    if (s[nl] == '\r' && end < s.length && s[end] == '\n') end += 1
+                    charCarry = StringBuilder(s.substring(end))
+                    return stripBom(line)
+                }
+                if (done) {
+                    return if (charCarry.isEmpty()) null else {
+                        val rest = charCarry.toString()
+                        charCarry = StringBuilder()
+                        stripBom(rest)
+                    }
+                }
+                val next = if (chunks.isNotEmpty()) chunks.removeFirst() else reader(FormatLimits.CHUNK_BYTES)
+                if (next == null) {
+                    // A dangling high byte at EOF means a truncated stream.
+                    if (pendingByte.isNotEmpty()) {
+                        throw ParseException("truncated UTF-16 stream: dangling high byte")
+                    }
+                    done = true
+                    continue
+                }
+                // Pair any pending high byte with the new chunk so 16-bit
+                // units stay aligned across chunk boundaries.
+                val full = if (pendingByte.isEmpty()) next else pendingByte + next
+                pendingByte = ByteArray(0)
+                val usable = if (full.size % 2 == 0) full else {
+                    pendingByte = byteArrayOf(full[full.size - 1])
+                    full.copyOfRange(0, full.size - 1)
+                }
+                charCarry.append(decode(usable))
+                if (charCarry.length > FormatLimits.MAX_BLOCK_CHARS) {
+                    throw ParseException("unterminated line exceeds sanity limit")
+                }
+            }
+        }
+
+        // ---- byte-oriented path (UTF-8 / GB18030) ----
+
+        private fun nextLineBytes(): String? {
             while (true) {
                 val nl = indexOfNewline(carry)
                 if (nl >= 0) {
                     val (line, skip) = splitLine(carry, nl)
                     carry = carry.copyOfRange(nl + skip, carry.size)
-                    return decode(line)
+                    return stripBom(decode(line))
                 }
                 if (done) {
                     return if (carry.isEmpty()) null else {
                         val rest = carry
                         carry = ByteArray(0)
-                        decode(rest)
+                        stripBom(decode(rest))
                     }
                 }
                 // Drain the sniffed chunk queue before pulling more bytes.
@@ -66,6 +129,18 @@ abstract class AbstractTextModule : FormatModule {
                     throw ParseException("unterminated line exceeds sanity limit")
                 }
             }
+        }
+
+        /**
+         * Strips a leading U+FEFF from the first decoded line. UTF-8 BOM is
+         * removed at the byte level in [splitLine]; UTF-16 decoders keep the
+         * BOM as a character, so drop it here once.
+         */
+        private fun stripBom(line: String): String {
+            if (!firstLine) return line
+            val cleaned = line.removePrefix("﻿")
+            firstLine = false
+            return cleaned
         }
 
         private fun decode(bytes: ByteArray): String = try {
@@ -94,11 +169,7 @@ abstract class AbstractTextModule : FormatModule {
             fun splitLine(bytes: ByteArray, nl: Int): Pair<ByteArray, Int> {
                 val isCr = bytes[nl] == 0x0D.toByte()
                 val skip = if (isCr && nl + 1 < bytes.size && bytes[nl + 1] == 0x0A.toByte()) 2 else 1
-                // A UTF-8 BOM may ride on the very first line.
-                val start =
-                    if (nl >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) 3
-                    else 0
-                return bytes.copyOfRange(start, nl) to skip
+                return bytes.copyOfRange(0, nl) to skip
             }
         }
     }

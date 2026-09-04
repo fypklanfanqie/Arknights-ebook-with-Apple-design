@@ -81,6 +81,9 @@ class TxtModule : AbstractTextModule() {
         }
         flush()
 
+        if (drafts.size > FormatLimits.MAX_CHAPTERS) {
+            throw ParseException("chapter count exceeds ${FormatLimits.MAX_CHAPTERS}")
+        }
         if (drafts.isEmpty()) {
             drafts.add(Draft(null, emptyList()))
         }

@@ -53,15 +53,17 @@ class TxtModuleTest {
         text: String,
         charset: Charset = Charsets.UTF_8,
         bookId: String = "b1",
+        chunkSize: Int = FormatLimits.CHUNK_BYTES,
+        module: AbstractTextModule = TxtModule(),
     ): ParsedBook {
         val bytes = text.toByteArray(charset)
         var offset = 0
-        return TxtModule().parse(
+        return module.parse(
             bookId = bookId,
             sizeBytes = bytes.size.toLong(),
             readBlock = { max ->
                 if (offset >= bytes.size) null else {
-                    val end = minOf(offset + max, bytes.size)
+                    val end = minOf(offset + chunkSize, bytes.size)
                     val chunk = bytes.copyOfRange(offset, end)
                     offset = end
                     chunk
@@ -154,6 +156,68 @@ class TxtModuleTest {
                 readBlock = { null },
             )
         }
+    }
+
+    @Test
+    fun `utf-16 le multi-line file parses end to end`() {
+        val text = "第一章 开端\n甲之内容。\n\n第二章 转折\n乙之内容。"
+        // UTF-16 without a BOM is indistinguishable from an arbitrary byte
+        // stream (CJK LE/BE bytes land in ASCII range), so files carry a BOM.
+        val withBom = "﻿" + text
+        val book = parse(withBom, charset = Charsets.UTF_16LE)
+        assertEquals(listOf("第一章 开端", "第二章 转折"), book.chapters.map { it.title })
+        assertEquals(
+            listOf(listOf("甲之内容。"), listOf("乙之内容。")),
+            book.chapters.indices.map { i -> blocksOfBook(book, i).map { it.text } },
+        )
+    }
+
+    @Test
+    fun `utf-16 be with bom parses and strips feff`() {
+        val text = "第一章 标题\n正文内容。"
+        val withBom = "﻿" + text
+        val book = parse(withBom, charset = Charsets.UTF_16BE)
+        assertEquals(listOf("第一章 标题"), book.chapters.map { it.title })
+        // The heading must not be poisoned by a leading U+FEFF.
+        assertTrue(book.chapters[0].title.startsWith("第一章"))
+        assertEquals(listOf("正文内容。"), blocksOfBook(book, 0).map { it.text })
+    }
+
+    @Test
+    fun `tiny chunks reproduce identical results (line reassembly)`() {
+        // 3-byte chunks force multi-byte CJK chars and CRLF pairs to straddle
+        // chunk boundaries — the exact path the LineStream bug broke.
+        val text = "第一章 开端\n甲之内容。\n\n第二章 转折\n乙之内容。"
+        val tiny = parse(text, chunkSize = 3)
+        val whole = parse(text)
+        assertEquals(whole.chapters.map { it.title }, tiny.chapters.map { it.title })
+        assertEquals(
+            whole.chapters.indices.map { i -> blocksOfBook(whole, i).map { it.text } },
+            tiny.chapters.indices.map { i -> blocksOfBook(tiny, i).map { it.text } },
+        )
+    }
+
+    @Test
+    fun `cr-only line endings still split lines`() {
+        val book = parse("第一章 A\n甲。\r第二章 B\r乙。")
+        assertEquals(2, book.chapters.size)
+        assertEquals(listOf("甲。"), blocksOfBook(book, 0).map { it.text })
+        assertEquals(listOf("乙。"), blocksOfBook(book, 1).map { it.text })
+    }
+
+    @Test
+    fun `utf-8 cjk is not misdetected as gb18030`() {
+        // Review I-2 repro: an even-count CJK run once fooled the GB pairing
+        // walk into GB18030-decoding UTF-8 text (silent mojibake). Strict
+        // UTF-8 validation now runs first, so the text must decode exactly.
+        val text = "中文\n中文\n第一章 检查\n内容验证完成。"
+        val book = parse(text, charset = Charsets.UTF_8)
+        // Preamble lines become chapter 0 (documented preamble semantics).
+        assertEquals(listOf("未分章", "第一章 检查"), book.chapters.map { it.title })
+        assertEquals(
+            listOf("中文", "中文", "内容验证完成。"),
+            book.chapters.flatMap { c -> book.blocksByChapter[c.id].orEmpty().map { it.text } },
+        )
     }
 
     @Test

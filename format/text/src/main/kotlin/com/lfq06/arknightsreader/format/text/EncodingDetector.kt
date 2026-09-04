@@ -1,10 +1,13 @@
 package com.lfq06.arknightsreader.format.text
 
 import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 
 /**
- * Text encoding detection for user-supplied files: BOM first, then GB18030
- * heuristics for CJK documents without a BOM, then UTF-8.
+ * Text encoding detection for user-supplied files: BOM first, then strict
+ * UTF-8 validation (UTF-8 CJK is far more common than GB18030 and strict
+ * validation cannot false-positive), then a GB18030 lead/trail heuristic for
+ * remaining non-UTF-8 byte streams, then a UTF-8 fallback for plain ASCII.
  */
 object EncodingDetector {
 
@@ -20,17 +23,26 @@ object EncodingDetector {
         if (header.size >= 2 && header[0] == 0xFE.toByte() && header[1] == 0xFF.toByte()) {
             return Charsets.UTF_16BE
         }
+        if (isValidUtf8(header)) return Charsets.UTF_8
         if (looksLikeGb18030(header)) return GB18030
         return Charsets.UTF_8
     }
 
+    /** Strict UTF-8 validation (REPORT semantics) over the sniffed bytes. */
+    private fun isValidUtf8(bytes: ByteArray): Boolean = try {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(java.nio.ByteBuffer.wrap(bytes))
+        true
+    } catch (_: Exception) {
+        false
+    }
+
     /**
      * GB18030 lead bytes: 0x81-0xFE start a two-byte sequence whose second
-     * byte is 0x40-0xFE (excluding 0x7F). Valid pure-ASCII files never enter
-     * this branch because they contain no high bytes. UTF-8 CJK text would
-     * produce E4-E9 leads with 0x80-0xBF continuations — the 0x40-0x7E range
-     * check on the second byte is what separates real GB18030 from UTF-8
-     * (UTF-8 continuation bytes never land in 0x40-0x7E).
+     * byte is 0x40-0xFE (excluding 0x7F). Only consulted after strict UTF-8
+     * validation failed, so UTF-8 CJK never reaches this heuristic.
      */
     private fun looksLikeGb18030(header: ByteArray): Boolean {
         var i = 0
