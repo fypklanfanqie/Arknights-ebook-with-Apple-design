@@ -23,11 +23,11 @@ data class LaidLine(
 /** One page: ordered lines plus the [startBlock..endBlock] block range. */
 data class Page(
     val index: Int,
-    val lines: List<LaidLine>,
+    val lineItems: List<LaidLine>,
     val startBlock: Int,
     val endBlock: Int,
 ) {
-    val blockIds: List<String> get() = lines.map { it.blockId }.distinct()
+    val blockIds: List<String> get() = lineItems.map { it.blockId }.distinct()
 }
 
 /**

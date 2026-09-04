@@ -77,7 +77,7 @@ class PaginatorTest {
         val pageMap = Paginator.paginate(context, listOf(block(0, longText)), spec(), fixedMeasurer())
         assertTrue("one 4000-char paragraph must split", pageMap.pages.size > 1)
         // Concatenated page text reconstructs the source.
-        val rebuilt = pageMap.pages.joinToString("") { p -> p.lines.joinToString("") { it.text } }
+        val rebuilt = pageMap.pages.joinToString("") { p -> p.lineItems.joinToString("") { it.text } }
         assertEquals(longText, rebuilt)
     }
 
