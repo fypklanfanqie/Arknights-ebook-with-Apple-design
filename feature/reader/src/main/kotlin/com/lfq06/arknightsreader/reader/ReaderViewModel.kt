@@ -135,6 +135,38 @@ class ReaderViewModel(
     }
 
     /** Persists the current page's first line as a Locator-style position. */
+    suspend fun saveNow() = savePosition()
+
+    /** Jumps to the first page of [chapterIndex]. */
+    suspend fun jumpToChapter(chapterIndex: Int) {
+        val bookId = _state.value?.bookId ?: return
+        if (chapterIndex in 0 until chapterIds.size) {
+            openChapter(bookId, chapterIndex)
+        }
+    }
+
+    /** Jumps to [page] within the current chapter. */
+    suspend fun jumpToPage(page: Int) {
+        val current = _state.value ?: return
+        if (page in current.pageMap.pages.indices) {
+            currentPage = page
+            savePosition()
+        }
+    }
+
+    /** Locator-style jump: reopens [chapterIndex] and restores to the page
+     *  holding [blockId] (falls back to its first page). */
+    suspend fun jumpToBlock(blockId: String, chapterIndex: Int) {
+        jumpToChapter(chapterIndex)
+        val current = _state.value ?: return
+        val page = current.pageMap.pages.indexOfFirst { p -> p.lineItems.any { it.blockId == blockId } }
+        if (page >= 0) {
+            currentPage = page
+            savePosition()
+        }
+    }
+
+    /** Persists the current page's first line as a Locator-style position. */
     private suspend fun savePosition() {
         val current = _state.value ?: return
         val page = current.pageMap.pages.getOrNull(currentPage) ?: return
