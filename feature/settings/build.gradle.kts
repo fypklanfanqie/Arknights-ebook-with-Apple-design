@@ -36,6 +36,7 @@ kotlin {
 dependencies {
     api(project(":data:model"))
 
+    implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.core)
 
     testImplementation(libs.kotlin.test)
